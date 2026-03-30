@@ -161,6 +161,8 @@ ${glossarySection}`;
   return results;
 }
 
+const MAX_PATCHES_PER_CALL = 10;
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as PropagateApplyRequest;
@@ -169,6 +171,13 @@ export async function POST(request: Request) {
     if (!patches || !sourceLang || !targetLang) {
       return NextResponse.json(
         { error: 'Missing required fields: patches, sourceLang, targetLang' },
+        { status: 400 }
+      );
+    }
+
+    if (patches.length > MAX_PATCHES_PER_CALL) {
+      return NextResponse.json(
+        { error: `Max ${MAX_PATCHES_PER_CALL} patches per call. Received ${patches.length}. Batch on the client side.` },
         { status: 400 }
       );
     }
@@ -187,22 +196,15 @@ export async function POST(request: Request) {
       }
     }
 
-    // Process patches in batches of 10
-    const BATCH_SIZE = 10;
-    const allResults: PatchResult[] = [];
-
-    for (let i = 0; i < patches.length; i += BATCH_SIZE) {
-      const batch = patches.slice(i, i + BATCH_SIZE);
-      const batchResults = await processPatchBatch(batch, sourceLang, targetLang, glossarySection);
-      allResults.push(...batchResults);
-    }
+    // Single Claude call with the received patches (max 10)
+    const results = await processPatchBatch(patches, sourceLang, targetLang, glossarySection);
 
     return NextResponse.json({
       language: targetLang,
-      patches: allResults,
+      patches: results,
       stats: {
         patchesRequested: patches.length,
-        patchesApplied: allResults.length,
+        patchesApplied: results.length,
       },
     });
   } catch (err) {

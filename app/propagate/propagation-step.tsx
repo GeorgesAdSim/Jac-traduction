@@ -174,30 +174,49 @@ export function PropagationStep({
       });
 
       try {
-        const res = await fetch('/api/propagate/apply', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            patches,
-            sourceLang,
-            targetLang: lang,
-            useGlossary,
-          }),
-        });
+        // Client-side batching: send max 8 patches per API call
+        const BATCH_SIZE = 8;
+        const totalBatches = Math.ceil(patches.length / BATCH_SIZE);
+        const allPatchResults: Array<{ index: number; find: string; replace: string }> = [];
+        let totalRequested = 0;
 
-        const text = await res.text();
-        let data: { language: string; patches: Array<{ index: number; find: string; replace: string }>; stats: { patchesRequested: number; patchesApplied: number } };
-        try {
-          data = JSON.parse(text);
-        } catch {
-          throw new Error(`Réponse invalide du serveur (${res.status})`);
+        for (let b = 0; b < totalBatches; b++) {
+          const batch = patches.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
+          addLog(`${lang} batch ${b + 1}/${totalBatches}...`);
+
+          const res = await fetch('/api/propagate/apply', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              patches: batch,
+              sourceLang,
+              targetLang: lang,
+              useGlossary,
+            }),
+          });
+
+          const text = await res.text();
+          let data: { language: string; patches: Array<{ index: number; find: string; replace: string }>; stats: { patchesRequested: number; patchesApplied: number } };
+          try {
+            data = JSON.parse(text);
+          } catch {
+            throw new Error(`Réponse invalide du serveur (${res.status})`);
+          }
+
+          if (!res.ok) {
+            throw new Error((data as unknown as { error: string }).error || `Erreur ${res.status}`);
+          }
+
+          allPatchResults.push(...data.patches);
+          totalRequested += data.stats.patchesRequested;
+
+          // Granular progress: (completed langs + batch fraction of current lang) / total langs
+          const batchFraction = (b + 1) / totalBatches;
+          const langProgress = (i + batchFraction) / selectedLangs.length;
+          setProgress(Math.round(langProgress * 100));
         }
 
-        if (!res.ok) {
-          throw new Error((data as unknown as { error: string }).error || `Erreur ${res.status}`);
-        }
-
-        // Apply FIND/REPLACE patches to the target section XML
+        // Apply all FIND/REPLACE patches to the target section XML
         let targetXml = getParagraphsXml(
           currentXml,
           targetSection.startPara,
@@ -205,7 +224,7 @@ export function PropagationStep({
         );
 
         let appliedCount = 0;
-        for (const patch of data.patches) {
+        for (const patch of allPatchResults) {
           if (patch.find && targetXml.includes(patch.find)) {
             targetXml = targetXml.replace(patch.find, patch.replace);
             appliedCount++;
@@ -249,7 +268,7 @@ export function PropagationStep({
         });
 
         setLangStatus((prev) => ({ ...prev, [lang]: 'done' }));
-        addLog(`${lang} : ${appliedCount} patch(es) appliqué(s) sur ${data.stats.patchesRequested}`);
+        addLog(`${lang} : ${appliedCount} patch(es) appliqué(s) sur ${totalRequested}`);
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Erreur inconnue';
         setLangStatus((prev) => ({ ...prev, [lang]: 'error' }));
