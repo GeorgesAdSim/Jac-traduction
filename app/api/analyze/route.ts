@@ -1,11 +1,24 @@
 import { NextResponse } from "next/server";
 import { analyzeDocx } from "@/lib/docx-parser";
 
-const MAX_SIZE = 10 * 1024 * 1024; // 10 MB
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
+const MAX_SIZE = 50 * 1024 * 1024; // 50 MB
 
 export async function POST(request: Request) {
   try {
-    const formData = await request.formData();
+    let formData: FormData;
+    try {
+      formData = await request.formData();
+    } catch (err) {
+      console.error("[analyze] Erreur lecture FormData:", err);
+      return NextResponse.json(
+        { error: "Impossible de lire le fichier. Vérifiez que la taille ne dépasse pas 50 Mo." },
+        { status: 400 }
+      );
+    }
+
     const file = formData.get("file") as File | null;
 
     if (!file) {
@@ -24,13 +37,19 @@ export async function POST(request: Request) {
 
     if (file.size > MAX_SIZE) {
       return NextResponse.json(
-        { error: "Le fichier dépasse la taille maximale de 10 Mo." },
+        { error: `Le fichier (${(file.size / 1024 / 1024).toFixed(1)} Mo) dépasse la taille maximale de 50 Mo.` },
         { status: 400 }
       );
     }
 
+    console.log(`[analyze] Début parsing: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} Mo)`);
+    const startTime = Date.now();
+
     const buffer = await file.arrayBuffer();
     const result = await analyzeDocx(buffer, file.name);
+
+    const elapsed = Date.now() - startTime;
+    console.log(`[analyze] Parsing terminé en ${elapsed}ms - ${result.modifications.length} modifications`);
 
     return NextResponse.json(result);
   } catch (err) {

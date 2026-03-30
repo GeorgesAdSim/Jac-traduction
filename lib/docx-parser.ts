@@ -87,13 +87,14 @@ export async function analyzeDocx(
   buffer: ArrayBuffer,
   filename: string
 ): Promise<AnalysisResult> {
-  const zip = await JSZip.loadAsync(buffer);
+  const zip = await JSZip.loadAsync(buffer, { createFolders: false });
 
   const docFile = zip.file("word/document.xml");
   if (!docFile) {
     throw new Error("Fichier document.xml introuvable dans le .docx");
   }
 
+  // Only extract document.xml, ignore media/images/embeddings
   const xmlContent = await docFile.async("string");
   const parsed = parser.parse(xmlContent);
 

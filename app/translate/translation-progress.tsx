@@ -50,8 +50,15 @@ export function TranslationProgress({
         onProgress(70);
 
         if (!res.ok) {
-          const errorData = await res.json();
-          throw new Error(errorData.error || 'Erreur de traduction');
+          const text = await res.text();
+          let errorMsg = 'Erreur de traduction';
+          try {
+            const errorData = JSON.parse(text);
+            errorMsg = errorData.error || errorMsg;
+          } catch {
+            errorMsg = `Le serveur a renvoyé une réponse invalide (${res.status}). Le fichier est peut-être trop volumineux.`;
+          }
+          throw new Error(errorMsg);
         }
 
         onProgress(90);

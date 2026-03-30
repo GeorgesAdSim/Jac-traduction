@@ -23,6 +23,11 @@ export default function PropagatePage() {
   const [propagationResults, setPropagationResults] = useState<unknown>(null);
 
   const handleFileSelect = useCallback((f: File) => {
+    const maxSizeMB = 50;
+    if (f.size > maxSizeMB * 1024 * 1024) {
+      toast.error(`Le fichier (${(f.size / 1024 / 1024).toFixed(1)} Mo) dépasse la limite de ${maxSizeMB} Mo.`);
+      return;
+    }
     setFile(f);
     toast.success('Document chargé avec succès');
   }, []);
@@ -42,16 +47,24 @@ export default function PropagatePage() {
         body: formData,
       });
 
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || 'Erreur lors de l\'analyse');
+      const text = await res.text();
+      let data: unknown;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(`Le serveur a renvoyé une réponse invalide (${res.status}). Le fichier est peut-être trop volumineux.`);
       }
 
-      setAnalysisResult(data as AnalysisResult);
+      if (!res.ok) {
+        const errorObj = data as { error?: string };
+        throw new Error(errorObj.error || 'Erreur lors de l\'analyse');
+      }
+
+      const analysisData = data as AnalysisResult;
+      setAnalysisResult(analysisData);
       setCurrentStep(2);
 
-      const total = data.modifications?.length ?? 0;
+      const total = analysisData.modifications?.length ?? 0;
       toast.success(`Analyse terminée - ${total} modification${total > 1 ? 's' : ''} détectée${total > 1 ? 's' : ''}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Erreur inconnue';

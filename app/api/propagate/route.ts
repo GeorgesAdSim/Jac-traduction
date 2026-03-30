@@ -3,6 +3,9 @@ import { getTerms } from '@/lib/glossary-service';
 import { translateBatch } from '@/lib/translation-service';
 import type { Modification } from '@/lib/types/docx';
 
+export const runtime = 'nodejs';
+export const maxDuration = 300;
+
 interface PropagateRequest {
   modifications: Modification[];
   targetLanguages: string[];

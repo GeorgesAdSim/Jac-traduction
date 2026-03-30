@@ -2,5 +2,8 @@
 command = "npx next build"
 publish = ".next"
 
+[functions]
+node_bundler = "esbuild"
+
 [[plugins]]
 package = "@netlify/plugin-nextjs"

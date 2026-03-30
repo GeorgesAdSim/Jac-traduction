@@ -23,6 +23,11 @@ export default function TranslatePage() {
   const [resultFilename, setResultFilename] = useState('');
 
   const handleFileSelect = useCallback((f: File) => {
+    const maxSizeMB = 50;
+    if (f.size > maxSizeMB * 1024 * 1024) {
+      toast.error(`Le fichier (${(f.size / 1024 / 1024).toFixed(1)} Mo) dépasse la limite de ${maxSizeMB} Mo.`);
+      return;
+    }
     setFile(f);
     toast.success('Document chargé avec succès');
   }, []);

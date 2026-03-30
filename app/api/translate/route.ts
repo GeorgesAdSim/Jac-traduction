@@ -4,6 +4,9 @@ import { XMLParser, XMLBuilder } from 'fast-xml-parser';
 import { getTerms } from '@/lib/glossary-service';
 import { translateBatch } from '@/lib/translation-service';
 
+export const runtime = 'nodejs';
+export const maxDuration = 300;
+
 const MAX_SIZE = 10 * 1024 * 1024;
 
 const parserOptions = {
