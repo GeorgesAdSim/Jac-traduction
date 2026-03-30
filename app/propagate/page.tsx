@@ -2,7 +2,7 @@
 
 import { useState, useCallback } from 'react';
 import { toast } from 'sonner';
-import { Play, CircleCheck as CheckCircle2 } from 'lucide-react';
+import { Play, CircleCheck as CheckCircle2, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Stepper } from '@/components/shared/stepper';
 import { DragDropZone } from '@/components/shared/drag-drop-zone';
@@ -10,25 +10,54 @@ import { AnalysisTable } from './analysis-table';
 import { ValidationStep } from './validation-step';
 import { PropagationStep } from './propagation-step';
 import { DownloadStep } from './download-step';
+import type { AnalysisResult } from '@/lib/types/docx';
 
 const STEPS = ['Upload', 'Analyse', 'Validation', 'Propagation', 'Téléchargement'];
 
 export default function PropagatePage() {
   const [currentStep, setCurrentStep] = useState(1);
   const [file, setFile] = useState<File | null>(null);
+  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   const handleFileSelect = useCallback((f: File) => {
     setFile(f);
     toast.success('Document chargé avec succès');
   }, []);
 
-  const handleAnalyze = useCallback(() => {
+  const handleAnalyze = useCallback(async () => {
+    if (!file) return;
+
+    setIsAnalyzing(true);
     toast.info('Analyse du document en cours...');
-    setTimeout(() => {
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const res = await fetch('/api/analyze', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Erreur lors de l\'analyse');
+      }
+
+      setAnalysisResult(data as AnalysisResult);
       setCurrentStep(2);
-      toast.success('Analyse terminée - 6 modifications détectées');
-    }, 1200);
-  }, []);
+
+      const total = data.modifications?.length ?? 0;
+      toast.success(`Analyse terminée - ${total} modification${total > 1 ? 's' : ''} détectée${total > 1 ? 's' : ''}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Erreur inconnue';
+      toast.error(message);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }, [file]);
 
   const handleValidate = useCallback(() => {
     setCurrentStep(3);
@@ -79,18 +108,22 @@ export default function PropagatePage() {
               </div>
               <Button
                 onClick={handleAnalyze}
-                disabled={!file}
+                disabled={!file || isAnalyzing}
                 className="w-full"
               >
-                <Play className="mr-2 h-4 w-4" />
-                Analyser le document
+                {isAnalyzing ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Play className="mr-2 h-4 w-4" />
+                )}
+                {isAnalyzing ? 'Analyse en cours...' : 'Analyser le document'}
               </Button>
             </div>
           )}
 
           {currentStep === 2 && (
             <div className="space-y-6">
-              <AnalysisTable />
+              <AnalysisTable result={analysisResult} />
               <div className="flex justify-end">
                 <Button onClick={handleValidate}>
                   <CheckCircle2 className="mr-2 h-4 w-4" />
