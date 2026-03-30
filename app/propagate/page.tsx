@@ -36,31 +36,12 @@ export default function PropagatePage() {
     if (!file) return;
 
     setIsAnalyzing(true);
-    toast.info('Analyse du document en cours...');
+    toast.info('Lecture du document...');
 
     try {
-      const formData = new FormData();
-      formData.append('file', file);
+      const { analyzeDocxClient } = await import('@/lib/client-docx-parser');
+      const analysisData = await analyzeDocxClient(file);
 
-      const res = await fetch('/api/analyze', {
-        method: 'POST',
-        body: formData,
-      });
-
-      const text = await res.text();
-      let data: unknown;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        throw new Error(`Le serveur a renvoyé une réponse invalide (${res.status}). Le fichier est peut-être trop volumineux.`);
-      }
-
-      if (!res.ok) {
-        const errorObj = data as { error?: string };
-        throw new Error(errorObj.error || 'Erreur lors de l\'analyse');
-      }
-
-      const analysisData = data as AnalysisResult;
       setAnalysisResult(analysisData);
       setCurrentStep(2);
 
