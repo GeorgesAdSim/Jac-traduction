@@ -78,8 +78,7 @@ function extractLanguages(docXml: Record<string, unknown>): string[] {
   return Array.from(langs);
 }
 
-export async function analyzeDocxClient(file: File): Promise<AnalysisResult> {
-  const buffer = await file.arrayBuffer();
+export async function analyzeDocxClient(buffer: ArrayBuffer, filename: string): Promise<AnalysisResult> {
   const zip = await JSZip.loadAsync(buffer, { createFolders: false });
 
   const docFile = zip.file("word/document.xml");
@@ -137,7 +136,7 @@ export async function analyzeDocxClient(file: File): Promise<AnalysisResult> {
   const languages = extractLanguages(parsed);
 
   return {
-    filename: file.name,
+    filename,
     totalParagraphs: paragraphs.length,
     modifications,
     languages: languages.length > 0 ? languages : ["fr"],

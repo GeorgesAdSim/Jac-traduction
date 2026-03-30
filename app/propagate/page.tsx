@@ -40,7 +40,8 @@ export default function PropagatePage() {
 
     try {
       const { analyzeDocxClient } = await import('@/lib/client-docx-parser');
-      const analysisData = await analyzeDocxClient(file);
+      const buffer = await file.arrayBuffer();
+      const analysisData = await analyzeDocxClient(buffer, file.name);
 
       setAnalysisResult(analysisData);
       setCurrentStep(2);
