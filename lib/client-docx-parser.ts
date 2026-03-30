@@ -111,24 +111,44 @@ export async function analyzeDocxClient(buffer: ArrayBuffer, filename: string): 
     }
     const fullContext = contextParts.join("");
 
+    let currentType: ModificationType = "NONE";
+    let currentText = "";
+    let currentColor = "";
+
     for (const run of runs) {
       const colorVal = getRunColor(run);
-      if (!colorVal) continue;
-
-      const modType: ModificationType = classifyColor(colorVal);
-      if (modType === "NONE") continue;
-
+      const modType: ModificationType = colorVal ? classifyColor(colorVal) : "NONE";
       const text = extractText(run["w:t"]);
-      if (!text.trim()) continue;
 
+      if (modType === currentType && modType !== "NONE") {
+        currentText += text;
+      } else {
+        if (currentType !== "NONE" && currentText.trim()) {
+          modCounter++;
+          modifications.push({
+            id: `mod-${String(modCounter).padStart(3, "0")}`,
+            type: currentType,
+            originalText: currentText,
+            paragraphIndex: pIdx,
+            context: fullContext,
+            color: currentColor,
+          });
+        }
+        currentType = modType;
+        currentText = modType !== "NONE" ? text : "";
+        currentColor = colorVal || "";
+      }
+    }
+
+    if (currentType !== "NONE" && currentText.trim()) {
       modCounter++;
       modifications.push({
         id: `mod-${String(modCounter).padStart(3, "0")}`,
-        type: modType,
-        originalText: text,
+        type: currentType,
+        originalText: currentText,
         paragraphIndex: pIdx,
         context: fullContext,
-        color: colorVal,
+        color: currentColor,
       });
     }
   }
