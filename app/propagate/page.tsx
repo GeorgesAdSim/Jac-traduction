@@ -11,6 +11,7 @@ import { ValidationStep } from './validation-step';
 import { PropagationStep } from './propagation-step';
 import { DownloadStep } from './download-step';
 import type { AnalysisResult, Modification } from '@/lib/types/docx';
+import type { LanguageResult } from './propagation-step';
 
 const STEPS = ['Upload', 'Analyse', 'Validation', 'Propagation', 'Téléchargement'];
 
@@ -20,7 +21,7 @@ export default function PropagatePage() {
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [selectedModifications, setSelectedModifications] = useState<Modification[]>([]);
-  const [propagationResults, setPropagationResults] = useState<unknown>(null);
+  const [propagationResults, setPropagationResults] = useState<LanguageResult[]>([]);
 
   const handleFileSelect = useCallback((f: File) => {
     const maxSizeMB = 50;
@@ -72,7 +73,7 @@ export default function PropagatePage() {
     [analysisResult]
   );
 
-  const handlePropagationComplete = useCallback((results: unknown) => {
+  const handlePropagationComplete = useCallback((results: LanguageResult[]) => {
     setPropagationResults(results);
     setCurrentStep(5);
   }, []);
@@ -156,7 +157,7 @@ export default function PropagatePage() {
 
           {currentStep === 5 && (
             <DownloadStep
-              results={propagationResults as DownloadStepProps_Results}
+              results={propagationResults}
               filename={file?.name}
             />
           )}
@@ -165,9 +166,3 @@ export default function PropagatePage() {
     </div>
   );
 }
-
-type DownloadStepProps_Results = {
-  language: string;
-  modifications: unknown[];
-  stats: { translated: number; deleted: number; total: number };
-}[];

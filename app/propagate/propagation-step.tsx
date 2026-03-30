@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
-import { Loader as Loader2, CircleCheck as CheckCircle2, BookOpen } from 'lucide-react';
+import { useState, useCallback, useRef } from 'react';
+import { Loader as Loader2, CircleCheck as CheckCircle2, BookOpen, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import type { Modification } from '@/lib/types/docx';
@@ -17,10 +17,16 @@ const AVAILABLE_LANGUAGES = [
   { code: 'AR', name: 'Arabe' },
 ];
 
+export interface LanguageResult {
+  language: string;
+  modifications: Array<Modification & { translatedText?: string; status: string }>;
+  stats: { translated: number; deleted: number; total: number };
+}
+
 interface PropagationStepProps {
   modifications?: Modification[];
   sourceLang?: string;
-  onComplete: (results: unknown) => void;
+  onComplete: (results: LanguageResult[]) => void;
 }
 
 export function PropagationStep({
@@ -32,9 +38,9 @@ export function PropagationStep({
   const [useGlossary, setUseGlossary] = useState(true);
   const [started, setStarted] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [currentLangIdx, setCurrentLangIdx] = useState(-1);
+  const [langStatus, setLangStatus] = useState<Record<string, 'pending' | 'active' | 'done' | 'error'>>({});
   const [logs, setLogs] = useState<string[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
   const completeCalled = useRef(false);
 
   const targetLangs = AVAILABLE_LANGUAGES.filter(
@@ -56,47 +62,72 @@ export function PropagationStep({
 
     setStarted(true);
     setProgress(0);
-    setCurrentLangIdx(0);
+    const initialStatus: Record<string, 'pending'> = {};
+    for (const lang of selectedLangs) initialStatus[lang] = 'pending';
+    setLangStatus(initialStatus);
     addLog('Initialisation du traitement...');
 
-    try {
-      const res = await fetch('/api/propagate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          modifications,
-          targetLanguages: selectedLangs,
-          useGlossary,
-          sourceLang,
-        }),
-      });
+    const allResults: LanguageResult[] = [];
+    const failedLangs: string[] = [];
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+    for (let i = 0; i < selectedLangs.length; i++) {
+      const lang = selectedLangs[i];
+      setLangStatus((prev) => ({ ...prev, [lang]: 'active' }));
+      addLog(`Traitement ${lang} en cours...`);
 
-      // Simulate progress through logs
-      for (let i = 0; i < data.results.length; i++) {
-        const result = data.results[i];
-        setCurrentLangIdx(i);
-        const pct = Math.round(((i + 1) / data.results.length) * 100);
-        setProgress(pct);
-        addLog(
-          `Traitement ${result.language} : ${result.stats.translated} traduite(s), ${result.stats.deleted} supprimée(s)`
-        );
+      try {
+        const res = await fetch('/api/propagate/language', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            modifications,
+            targetLang: lang,
+            useGlossary,
+            sourceLang,
+          }),
+        });
+
+        const text = await res.text();
+        let data: LanguageResult;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          throw new Error(`Réponse invalide du serveur (${res.status})`);
+        }
+
+        if (!res.ok) {
+          throw new Error((data as unknown as { error: string }).error || `Erreur ${res.status}`);
+        }
+
+        allResults.push(data);
+        setLangStatus((prev) => ({ ...prev, [lang]: 'done' }));
+        addLog(`Traitement ${lang} : ${data.stats.translated} traduite(s), ${data.stats.deleted} supprimée(s)`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Erreur inconnue';
+        setLangStatus((prev) => ({ ...prev, [lang]: 'error' }));
+        addLog(`ERREUR ${lang} : ${message}`);
+        failedLangs.push(lang);
+        setWarnings((prev) => [...prev, `${lang} : ${message}`]);
       }
 
+      const pct = Math.round(((i + 1) / selectedLangs.length) * 100);
+      setProgress(pct);
+    }
+
+    if (failedLangs.length > 0 && failedLangs.length < selectedLangs.length) {
+      addLog(`Propagation terminée avec ${failedLangs.length} erreur(s)`);
+    } else if (failedLangs.length === 0) {
       addLog('Vérification de cohérence...');
-      setProgress(100);
       addLog('Propagation terminée avec succès');
+    } else {
+      addLog('Propagation échouée pour toutes les langues');
+    }
 
-      if (!completeCalled.current) {
-        completeCalled.current = true;
-        setTimeout(() => onComplete(data.results), 800);
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Erreur de propagation';
-      setError(message);
-      addLog(`ERREUR: ${message}`);
+    setProgress(100);
+
+    if (allResults.length > 0 && !completeCalled.current) {
+      completeCalled.current = true;
+      setTimeout(() => onComplete(allResults), 800);
     }
   }, [modifications, selectedLangs, useGlossary, sourceLang, addLog, onComplete]);
 
@@ -183,24 +214,22 @@ export function PropagationStep({
       </div>
 
       <div className="flex gap-2 sm:gap-3">
-        {selectedLangs.map((code, i) => {
-          const done = i < currentLangIdx || progress >= 100;
-          const active = i === currentLangIdx && progress < 100;
+        {selectedLangs.map((code) => {
+          const status = langStatus[code] || 'pending';
           return (
             <div
               key={code}
               className={cn(
                 'flex flex-1 items-center justify-center gap-2 rounded border px-2 py-2.5 text-sm font-medium transition-colors sm:px-3',
-                done && 'border-green-200 bg-green-50 text-green-700',
-                active && 'border-jac-red/30 bg-red-50 text-jac-red',
-                !done && !active && 'border-border bg-white text-jac-text-secondary'
+                status === 'done' && 'border-green-200 bg-green-50 text-green-700',
+                status === 'active' && 'border-jac-red/30 bg-red-50 text-jac-red',
+                status === 'error' && 'border-orange-200 bg-orange-50 text-orange-700',
+                status === 'pending' && 'border-border bg-white text-jac-text-secondary'
               )}
             >
-              {done ? (
-                <CheckCircle2 className="h-4 w-4" />
-              ) : active ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : null}
+              {status === 'done' && <CheckCircle2 className="h-4 w-4" />}
+              {status === 'active' && <Loader2 className="h-4 w-4 animate-spin" />}
+              {status === 'error' && <AlertTriangle className="h-4 w-4" />}
               {code}
             </div>
           );
@@ -215,15 +244,20 @@ export function PropagationStep({
               {log}
             </p>
           ))}
-          {progress < 100 && !error && (
+          {progress < 100 && (
             <span className="inline-block animate-pulse">_</span>
           )}
         </div>
       </div>
 
-      {error && (
-        <div className="rounded border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-          {error}
+      {warnings.length > 0 && (
+        <div className="rounded border border-orange-200 bg-orange-50 p-4 text-sm text-orange-700">
+          <p className="font-medium">Avertissements :</p>
+          <ul className="mt-1 list-disc pl-4">
+            {warnings.map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
+          </ul>
         </div>
       )}
     </div>
