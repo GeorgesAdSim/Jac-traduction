@@ -99,7 +99,7 @@ export function PropagationStep({
     // Step 1: Clean source section
     addLog('Nettoyage de la section source...');
     const { cleanSourceSection } = await import('@/lib/docx-source-cleaner');
-    const { getParagraphTexts } = await import('@/lib/docx-rebuilder');
+    const { getParagraphTexts, getParagraphsXml } = await import('@/lib/docx-rebuilder');
 
     const sourceSection = sections.find((s) => s.isSource);
     if (!sourceSection) {
@@ -115,18 +115,19 @@ export function PropagationStep({
 
     addLog(`${appliedMods.length} modifications appliquées à la section source`);
 
-    // Get source section text (after cleaning)
+    // Get source section texts (after cleaning) for building context patches
     const sourceTexts = getParagraphTexts(
       cleanedXml,
       sourceSection.startPara,
       sourceSection.endPara
     );
 
-    // Step 2: Propagate to each target language
+    // Step 2: Propagate to each target language using lightweight patches
     let currentXml = cleanedXml;
     const languageStats: PropagationResult['languageStats'] = [];
     const legacyResults: LanguageResult[] = [];
     const failedLangs: string[] = [];
+    const CONTEXT_RADIUS = 3;
 
     for (let i = 0; i < selectedLangs.length; i++) {
       const lang = selectedLangs[i];
@@ -143,21 +144,41 @@ export function PropagationStep({
         continue;
       }
 
-      // Get target section text
+      // Get target section texts for context extraction
       const targetTexts = getParagraphTexts(
         currentXml,
         targetSection.startPara,
         targetSection.endPara
       );
 
+      // Build lightweight patches: only ~6 paragraphs of context per modification
+      const patches = appliedMods.map((mod) => {
+        const srcIdx = mod.paragraphIndex; // relative to source section
+        // Map source paragraph index to approximate target index (proportional)
+        const ratio = targetTexts.length / sourceTexts.length;
+        const tgtIdx = Math.min(Math.round(srcIdx * ratio), targetTexts.length - 1);
+
+        // Extract ±CONTEXT_RADIUS paragraphs around modification
+        const srcStart = Math.max(0, srcIdx - CONTEXT_RADIUS);
+        const srcEnd = Math.min(sourceTexts.length - 1, srcIdx + CONTEXT_RADIUS);
+        const tgtStart = Math.max(0, tgtIdx - CONTEXT_RADIUS);
+        const tgtEnd = Math.min(targetTexts.length - 1, tgtIdx + CONTEXT_RADIUS);
+
+        return {
+          type: mod.type as 'DELETE' | 'MODIFY' | 'ADD',
+          text: mod.text,
+          sourceContext: sourceTexts.slice(srcStart, srcEnd + 1).filter(Boolean),
+          targetContext: targetTexts.slice(tgtStart, tgtEnd + 1).filter(Boolean),
+          paragraphIndex: srcIdx,
+        };
+      });
+
       try {
         const res = await fetch('/api/propagate/apply', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            sourceTexts,
-            targetTexts,
-            modifications: appliedMods,
+            patches,
             sourceLang,
             targetLang: lang,
             useGlossary,
@@ -165,7 +186,7 @@ export function PropagationStep({
         });
 
         const text = await res.text();
-        let data: { language: string; modifiedTexts: string[]; stats: { totalParagraphs: number; modifiedParagraphs: number; modificationsApplied: number } };
+        let data: { language: string; patches: Array<{ index: number; find: string; replace: string }>; stats: { patchesRequested: number; patchesApplied: number } };
         try {
           data = JSON.parse(text);
         } catch {
@@ -176,42 +197,34 @@ export function PropagationStep({
           throw new Error((data as unknown as { error: string }).error || `Erreur ${res.status}`);
         }
 
-        // Apply the modified texts back into the document XML
-        // We need to update the text content within the XML paragraphs
-        const { replaceParagraphsInXml, getParagraphsXml } = await import('@/lib/docx-rebuilder');
-
-        // Get original target paragraphs XML
-        const targetParasXml = getParagraphsXml(
+        // Apply FIND/REPLACE patches to the target section XML
+        let targetXml = getParagraphsXml(
           currentXml,
           targetSection.startPara,
           targetSection.endPara
         );
 
-        // Replace text content in the XML
-        let modifiedTargetXml = targetParasXml;
-        for (let j = 0; j < targetTexts.length; j++) {
-          if (data.modifiedTexts[j] !== targetTexts[j] && targetTexts[j].trim()) {
-            // Replace the old text with new text in the XML
-            // We escape special XML chars in both old and new text
-            const oldText = targetTexts[j];
-            const newText = data.modifiedTexts[j];
-            if (oldText && modifiedTargetXml.includes(oldText)) {
-              modifiedTargetXml = modifiedTargetXml.replace(oldText, newText);
-            }
+        let appliedCount = 0;
+        for (const patch of data.patches) {
+          if (patch.find && targetXml.includes(patch.find)) {
+            targetXml = targetXml.replace(patch.find, patch.replace);
+            appliedCount++;
           }
         }
 
+        // Put the modified target XML back into the full document
+        const { replaceParagraphsInXml } = await import('@/lib/docx-rebuilder');
         currentXml = replaceParagraphsInXml(
           currentXml,
           targetSection.startPara,
           targetSection.endPara,
-          modifiedTargetXml
+          targetXml
         );
 
         languageStats.push({
           language: lang,
-          modifiedParagraphs: data.stats.modifiedParagraphs,
-          totalParagraphs: data.stats.totalParagraphs,
+          modifiedParagraphs: appliedCount,
+          totalParagraphs: targetTexts.length,
         });
 
         // Build legacy result for CSV/JSON export
@@ -236,7 +249,7 @@ export function PropagationStep({
         });
 
         setLangStatus((prev) => ({ ...prev, [lang]: 'done' }));
-        addLog(`${lang} : ${data.stats.modifiedParagraphs} paragraphe(s) modifié(s)`);
+        addLog(`${lang} : ${appliedCount} patch(es) appliqué(s) sur ${data.stats.patchesRequested}`);
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Erreur inconnue';
         setLangStatus((prev) => ({ ...prev, [lang]: 'error' }));

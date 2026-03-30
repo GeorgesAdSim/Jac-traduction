@@ -1,18 +1,29 @@
 import { NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
 import { getTerms } from '@/lib/glossary-service';
-import type { AppliedModification } from '@/lib/docx-source-cleaner';
 
 export const runtime = 'nodejs';
-export const maxDuration = 120;
+export const maxDuration = 60;
+
+interface ModificationPatch {
+  type: 'DELETE' | 'MODIFY' | 'ADD';
+  text: string;
+  sourceContext: string[];
+  targetContext: string[];
+  paragraphIndex: number;
+}
 
 interface PropagateApplyRequest {
-  sourceTexts: string[];
-  targetTexts: string[];
-  modifications: AppliedModification[];
+  patches: ModificationPatch[];
   sourceLang: string;
   targetLang: string;
   useGlossary: boolean;
+}
+
+interface PatchResult {
+  index: number;
+  find: string;
+  replace: string;
 }
 
 let anthropicClient: Anthropic | null = null;
@@ -41,20 +52,6 @@ const LANG_NAMES: Record<string, string> = {
   PT: 'Portuguese',
 };
 
-function buildModificationsSummary(modifications: AppliedModification[]): string {
-  return modifications.map((mod, i) => {
-    const typeLabel = mod.type === 'DELETE' ? 'DELETE' : mod.type === 'ADD' ? 'ADD' : 'MODIFY';
-    let desc = `${i + 1}. [${typeLabel}] "${mod.text}"`;
-    if (mod.contextBefore) {
-      desc += `\n   Context before: "${mod.contextBefore.substring(0, 100)}"`;
-    }
-    if (mod.contextAfter) {
-      desc += `\n   Context after: "${mod.contextAfter.substring(0, 100)}"`;
-    }
-    return desc;
-  }).join('\n\n');
-}
-
 async function callWithRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
@@ -73,30 +70,33 @@ async function callWithRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T
 }
 
 /**
- * Process a chunk of target text with Claude to apply modifications.
+ * Process a batch of patches (max 10) with Claude.
+ * Returns FIND/REPLACE pairs to apply in the target section.
  */
-async function propagateChunk(
-  sourceTexts: string[],
-  targetTexts: string[],
-  modifications: AppliedModification[],
+async function processPatchBatch(
+  patches: ModificationPatch[],
   sourceLang: string,
   targetLang: string,
   glossarySection: string
-): Promise<string[]> {
-  const sourceSection = sourceTexts
-    .map((t, i) => `[P${i}] ${t}`)
-    .filter((_t, i) => sourceTexts[i].trim())
-    .join('\n');
+): Promise<PatchResult[]> {
+  const targetName = LANG_NAMES[targetLang] || targetLang;
+  const sourceName = LANG_NAMES[sourceLang] || sourceLang;
 
-  const targetSection = targetTexts
-    .map((t, i) => `[P${i}] ${t}`)
-    .filter((_t, i) => targetTexts[i].trim())
-    .join('\n');
+  const patchDescriptions = patches.map((patch, i) => {
+    const typeLabel = patch.type;
+    const sourceCtx = patch.sourceContext.filter(Boolean).join('\n    ');
+    const targetCtx = patch.targetContext.filter(Boolean).join('\n    ');
 
-  const modSummary = buildModificationsSummary(modifications);
+    return `--- MODIFICATION ${i + 1} [${typeLabel}] ---
+  Text in ${sourceName}: "${patch.text}"
+  ${sourceName} context (surrounding paragraphs):
+    ${sourceCtx}
+  ${targetName} context (surrounding paragraphs):
+    ${targetCtx}`;
+  }).join('\n\n');
 
   const systemPrompt = `You are an expert technical documentation translator for JAC industrial bakery machines.
-You apply modifications from the ${LANG_NAMES[sourceLang] || sourceLang} source section to the ${LANG_NAMES[targetLang] || targetLang} target section.
+You propagate modifications from ${sourceName} to ${targetName}.
 
 MANDATORY RULES:
 1. NEVER translate machine names: DURO, VARIA, VMP, VMA, VMS, PICO, FORM-IT, SOLEO, TOPAZE, SIMPLY, NEMO, PICOMATIC
@@ -104,35 +104,26 @@ MANDATORY RULES:
 3. Preserve figure references: fig.2, n°12, §3.1
 4. Preserve units: mm, kg, °C, rpm, bar
 5. RESPECT the glossary terms exactly when provided
-6. Return ONLY the modified target paragraphs in the exact same format [P0], [P1], etc.
-7. For paragraphs with NO changes, return them exactly as they were`;
 
-  const userMessage = `Here is the ${LANG_NAMES[sourceLang] || sourceLang} SOURCE section (after modifications were applied):
+RESPONSE FORMAT — for each modification, output exactly one line:
+PATCH N: FIND: <exact text to find in ${targetName}> | REPLACE: <new text in ${targetName}>
 
-${sourceSection}
+For DELETE modifications: the REPLACE value must be empty (nothing after REPLACE:)
+For MODIFY modifications: FIND is the old ${targetName} text, REPLACE is the new translated text
+For ADD modifications: FIND must be the ${targetName} text of the closest paragraph AFTER which to insert, and REPLACE must be that same text followed by the new translated text
 
-Here are the modifications that were applied to the source:
+If you cannot find a matching passage in the ${targetName} context, output:
+PATCH N: SKIP
 
-${modSummary}
+Output ONLY PATCH lines, nothing else.`;
 
-Here is the current ${LANG_NAMES[targetLang] || targetLang} TARGET section:
-
-${targetSection}
-
-${glossarySection}
-
-INSTRUCTIONS:
-- For each DELETE modification: find the corresponding passage in the target section and remove it
-- For each MODIFY modification: find the old text's equivalent in the target and replace it with the translation of the new text
-- For each ADD modification: translate the new text and insert it at the same relative position as in the source
-- Return ALL paragraphs of the target section (modified and unmodified) in the [P0], [P1], ... format
-- Only modify paragraphs that are affected by the listed modifications
-- Keep all other paragraphs exactly as they are`;
+  const userMessage = `${patchDescriptions}
+${glossarySection}`;
 
   const response = await callWithRetry(() =>
     getClient().messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 16384,
+      max_tokens: 4096,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
     })
@@ -143,31 +134,41 @@ INSTRUCTIONS:
     throw new Error('Unexpected response from Claude');
   }
 
-  // Parse the response: extract [P0], [P1], ... lines
+  const results: PatchResult[] = [];
   const lines = content.text.split('\n');
-  const resultTexts: string[] = [...targetTexts]; // start with originals
 
   for (const line of lines) {
-    const match = line.match(/^\[P(\d+)\]\s*(.*)/);
-    if (match) {
-      const idx = parseInt(match[1], 10);
-      if (idx >= 0 && idx < resultTexts.length) {
-        resultTexts[idx] = match[2];
-      }
+    const patchMatch = line.match(/^PATCH\s+(\d+):\s*(?:FIND:\s*(.*?)\s*\|\s*REPLACE:\s*(.*)|SKIP)\s*$/i);
+    if (!patchMatch) continue;
+
+    const patchIndex = parseInt(patchMatch[1], 10) - 1;
+    if (patchIndex < 0 || patchIndex >= patches.length) continue;
+
+    if (line.toUpperCase().includes('SKIP')) continue;
+
+    const find = (patchMatch[2] || '').trim();
+    const replace = (patchMatch[3] || '').trim();
+
+    if (find) {
+      results.push({
+        index: patches[patchIndex].paragraphIndex,
+        find,
+        replace,
+      });
     }
   }
 
-  return resultTexts;
+  return results;
 }
 
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as PropagateApplyRequest;
-    const { sourceTexts, targetTexts, modifications, sourceLang, targetLang, useGlossary } = body;
+    const { patches, sourceLang, targetLang, useGlossary } = body;
 
-    if (!sourceTexts || !targetTexts || !modifications || !sourceLang || !targetLang) {
+    if (!patches || !sourceLang || !targetLang) {
       return NextResponse.json(
-        { error: 'Missing required fields: sourceTexts, targetTexts, modifications, sourceLang, targetLang' },
+        { error: 'Missing required fields: patches, sourceLang, targetLang' },
         { status: 400 }
       );
     }
@@ -186,62 +187,22 @@ export async function POST(request: Request) {
       }
     }
 
-    // Split into chunks if target is very large (>200 paragraphs)
-    const CHUNK_SIZE = 200;
-    const OVERLAP = 10;
-    const resultTexts: string[] = [...targetTexts];
+    // Process patches in batches of 10
+    const BATCH_SIZE = 10;
+    const allResults: PatchResult[] = [];
 
-    if (targetTexts.length <= CHUNK_SIZE) {
-      const modified = await propagateChunk(
-        sourceTexts, targetTexts, modifications,
-        sourceLang, targetLang, glossarySection
-      );
-      for (let i = 0; i < modified.length; i++) {
-        resultTexts[i] = modified[i];
-      }
-    } else {
-      // Process in chunks with overlap
-      for (let start = 0; start < targetTexts.length; start += CHUNK_SIZE - OVERLAP) {
-        const end = Math.min(start + CHUNK_SIZE, targetTexts.length);
-        const chunkTarget = targetTexts.slice(start, end);
-
-        // Find modifications relevant to this chunk range
-        // (rough mapping based on relative position)
-        const chunkMods = modifications.filter((mod) => {
-          const relativePos = mod.paragraphIndex / sourceTexts.length;
-          const chunkStartRel = start / targetTexts.length;
-          const chunkEndRel = end / targetTexts.length;
-          return relativePos >= chunkStartRel - 0.1 && relativePos <= chunkEndRel + 0.1;
-        });
-
-        if (chunkMods.length === 0) continue;
-
-        const modified = await propagateChunk(
-          sourceTexts, chunkTarget, chunkMods,
-          sourceLang, targetLang, glossarySection
-        );
-
-        // Apply chunk results (skip overlap at beginning except for first chunk)
-        const skipStart = start === 0 ? 0 : OVERLAP;
-        for (let i = skipStart; i < modified.length; i++) {
-          resultTexts[start + i] = modified[i];
-        }
-      }
-    }
-
-    // Count changes
-    let changedCount = 0;
-    for (let i = 0; i < resultTexts.length; i++) {
-      if (resultTexts[i] !== targetTexts[i]) changedCount++;
+    for (let i = 0; i < patches.length; i += BATCH_SIZE) {
+      const batch = patches.slice(i, i + BATCH_SIZE);
+      const batchResults = await processPatchBatch(batch, sourceLang, targetLang, glossarySection);
+      allResults.push(...batchResults);
     }
 
     return NextResponse.json({
       language: targetLang,
-      modifiedTexts: resultTexts,
+      patches: allResults,
       stats: {
-        totalParagraphs: resultTexts.length,
-        modifiedParagraphs: changedCount,
-        modificationsApplied: modifications.length,
+        patchesRequested: patches.length,
+        patchesApplied: allResults.length,
       },
     });
   } catch (err) {
