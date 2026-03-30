@@ -11,7 +11,7 @@ import { ValidationStep } from './validation-step';
 import { PropagationStep } from './propagation-step';
 import { DownloadStep } from './download-step';
 import type { AnalysisResult, Modification } from '@/lib/types/docx';
-import type { LanguageResult } from './propagation-step';
+import type { PropagationResult } from './propagation-step';
 
 const STEPS = ['Upload', 'Analyse', 'Validation', 'Propagation', 'Téléchargement'];
 
@@ -21,7 +21,7 @@ export default function PropagatePage() {
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [selectedModifications, setSelectedModifications] = useState<Modification[]>([]);
-  const [propagationResults, setPropagationResults] = useState<LanguageResult[]>([]);
+  const [propagationResult, setPropagationResult] = useState<PropagationResult | null>(null);
 
   const handleFileSelect = useCallback((f: File) => {
     const maxSizeMB = 50;
@@ -48,7 +48,14 @@ export default function PropagatePage() {
       setCurrentStep(2);
 
       const total = analysisData.modifications?.length ?? 0;
-      toast.success(`Analyse terminée - ${total} modification${total > 1 ? 's' : ''} détectée${total > 1 ? 's' : ''}`);
+      const sectionCount = analysisData.sections?.length ?? 0;
+      const sourceLang = analysisData.sourceLang ?? '?';
+
+      let msg = `Analyse terminée - ${total} modification${total > 1 ? 's' : ''} détectée${total > 1 ? 's' : ''}`;
+      if (sectionCount > 0) {
+        msg += ` | ${sectionCount} sections linguistiques (source: ${sourceLang})`;
+      }
+      toast.success(msg);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Erreur inconnue';
       toast.error(message);
@@ -73,8 +80,8 @@ export default function PropagatePage() {
     [analysisResult]
   );
 
-  const handlePropagationComplete = useCallback((results: LanguageResult[]) => {
-    setPropagationResults(results);
+  const handlePropagationComplete = useCallback((result: PropagationResult) => {
+    setPropagationResult(result);
     setCurrentStep(5);
   }, []);
 
@@ -104,8 +111,8 @@ export default function PropagatePage() {
                     Rouge = supprimer
                   </span>
                   <span className="flex items-center gap-1.5">
-                    <span className="inline-block h-3 w-3 rounded-full bg-blue-500" />
-                    Bleu = modifier
+                    <span className="inline-block h-3 w-3 rounded-full bg-cyan-500" />
+                    Cyan = modifier
                   </span>
                   <span className="flex items-center gap-1.5">
                     <span className="inline-block h-3 w-3 rounded-full bg-green-500" />
@@ -150,14 +157,17 @@ export default function PropagatePage() {
           {currentStep === 4 && (
             <PropagationStep
               modifications={selectedModifications}
-              sourceLang={analysisResult?.languages[0] || 'FR'}
+              sourceLang={analysisResult?.sourceLang || 'EN'}
+              sections={analysisResult?.sections}
+              documentXml={analysisResult?.documentXml}
               onComplete={handlePropagationComplete}
             />
           )}
 
           {currentStep === 5 && (
             <DownloadStep
-              results={propagationResults}
+              propagationResult={propagationResult ?? undefined}
+              file={file}
               filename={file?.name}
             />
           )}

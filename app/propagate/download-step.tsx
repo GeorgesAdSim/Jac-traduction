@@ -3,10 +3,12 @@
 import { Download, CircleCheck as CheckCircle2, FileText, FileSpreadsheet, Braces } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import type { PropagationResult } from './propagation-step';
 import type { LanguageResult } from './propagation-step';
 
 interface DownloadStepProps {
-  results?: LanguageResult[];
+  propagationResult?: PropagationResult;
+  file?: File | null;
   filename?: string;
 }
 
@@ -25,7 +27,6 @@ function generateCSV(results: LanguageResult[]): string {
   const languages = results.map((r) => r.language);
   const headers = ['Type', 'Texte original', ...languages];
 
-  // Build rows from first result's modifications (all results have same source mods)
   const firstResult = results[0];
   const rows: string[][] = [];
 
@@ -64,12 +65,34 @@ function generateCSV(results: LanguageResult[]): string {
   return '\uFEFF' + csvLines.join('\n');
 }
 
-export function DownloadStep({ results, filename }: DownloadStepProps) {
-  const languages = results?.map((r) => r.language) ?? [];
-  const totalMods = results?.[0]?.stats.total ?? 0;
+export function DownloadStep({ propagationResult, file, filename }: DownloadStepProps) {
+  const results = propagationResult?.legacyResults ?? [];
+  const langStats = propagationResult?.languageStats ?? [];
+  const totalLangs = langStats.length;
+  const totalModifiedParas = langStats.reduce((acc, s) => acc + s.modifiedParagraphs, 0);
+
+  const handleDownloadDocx = async () => {
+    if (!propagationResult?.modifiedDocumentXml || !file) {
+      toast.error('Document non disponible');
+      return;
+    }
+
+    try {
+      const { rebuildDocx } = await import('@/lib/docx-rebuilder');
+      const blob = await rebuildDocx(file, propagationResult.modifiedDocumentXml);
+      const name = filename
+        ? filename.replace('.docx', '_propagated.docx')
+        : 'document_propagated.docx';
+      downloadBlob(blob, name);
+      toast.success('Document .docx téléchargé');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Erreur inconnue';
+      toast.error(`Erreur reconstruction : ${message}`);
+    }
+  };
 
   const handleDownloadCSV = () => {
-    if (!results) return;
+    if (results.length === 0) return;
     const csv = generateCSV(results);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
     const name = filename
@@ -80,7 +103,7 @@ export function DownloadStep({ results, filename }: DownloadStepProps) {
   };
 
   const handleDownloadJSON = () => {
-    if (!results) return;
+    if (results.length === 0) return;
     const content = JSON.stringify(results, null, 2);
     const blob = new Blob([content], { type: 'application/json' });
     const name = filename
@@ -88,15 +111,6 @@ export function DownloadStep({ results, filename }: DownloadStepProps) {
       : 'propagation_rapport.json';
     downloadBlob(blob, name);
     toast.success('Rapport JSON téléchargé');
-  };
-
-  const handleDownloadLang = (lang: string) => {
-    const result = results?.find((r) => r.language === lang);
-    if (!result) return;
-    const content = JSON.stringify(result, null, 2);
-    const blob = new Blob([content], { type: 'application/json' });
-    downloadBlob(blob, `propagation_${lang}.json`);
-    toast.success(`Résultat ${lang} téléchargé`);
   };
 
   return (
@@ -107,13 +121,21 @@ export function DownloadStep({ results, filename }: DownloadStepProps) {
           Propagation terminée
         </h3>
         <p className="mt-2 text-sm text-jac-text-secondary">
-          {totalMods} modification{totalMods > 1 ? 's' : ''} propagée{totalMods > 1 ? 's' : ''} dans {languages.length} langue{languages.length > 1 ? 's' : ''} ({languages.join(', ')})
+          {totalModifiedParas} paragraphe{totalModifiedParas > 1 ? 's' : ''} modifié{totalModifiedParas > 1 ? 's' : ''} dans {totalLangs} langue{totalLangs > 1 ? 's' : ''} ({langStats.map((s) => s.language).join(', ')})
         </p>
       </div>
 
-      {/* Rapport téléchargeable */}
-      <div className="mt-6 flex gap-3">
-        <Button onClick={handleDownloadCSV} className="flex-1">
+      {/* Primary action: download .docx */}
+      <div className="mt-6">
+        <Button onClick={handleDownloadDocx} className="w-full" size="lg">
+          <Download className="mr-2 h-5 w-5" />
+          Télécharger le document mis à jour (.docx)
+        </Button>
+      </div>
+
+      {/* Secondary: reports */}
+      <div className="mt-4 flex gap-3">
+        <Button onClick={handleDownloadCSV} variant="outline" className="flex-1">
           <FileSpreadsheet className="mr-2 h-4 w-4" />
           Rapport CSV
         </Button>
@@ -123,33 +145,26 @@ export function DownloadStep({ results, filename }: DownloadStepProps) {
         </Button>
       </div>
 
-      {/* Résultats par langue */}
+      {/* Per-language stats */}
       <div className="mt-6 space-y-3">
         <h4 className="text-sm font-semibold text-jac-dark">Résultats par langue</h4>
-        {(results ?? []).map((result) => (
+        {langStats.map((stat) => (
           <div
-            key={result.language}
+            key={stat.language}
             className="flex items-center justify-between rounded border border-border bg-white px-4 py-3"
           >
             <div className="flex items-center gap-3">
               <FileText className="h-5 w-5 text-jac-text-secondary" />
               <div>
                 <span className="text-sm font-medium text-jac-dark">
-                  {result.language}
+                  {stat.language}
                 </span>
                 <p className="text-xs text-jac-text-secondary">
-                  {result.stats.translated} traduite(s), {result.stats.deleted} supprimée(s)
+                  {stat.modifiedParagraphs} paragraphe(s) modifié(s) sur {stat.totalParagraphs}
                 </p>
               </div>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => handleDownloadLang(result.language)}
-            >
-              <Download className="mr-1.5 h-3.5 w-3.5" />
-              JSON
-            </Button>
+            <CheckCircle2 className="h-4 w-4 text-green-600" />
           </div>
         ))}
       </div>

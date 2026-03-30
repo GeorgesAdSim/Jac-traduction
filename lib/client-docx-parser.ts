@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
 import { classifyColor } from "./color-classifier";
+import { detectLanguageSections } from "./docx-section-detector";
 import type { AnalysisResult, Modification, ModificationType } from "./types/docx";
 
 const parser = new XMLParser({
@@ -155,6 +156,9 @@ export async function analyzeDocxClient(buffer: ArrayBuffer, filename: string): 
 
   const languages = extractLanguages(parsed);
 
+  // Detect language sections
+  const sectionResult = detectLanguageSections(parsed);
+
   return {
     filename,
     totalParagraphs: paragraphs.length,
@@ -165,5 +169,8 @@ export async function analyzeDocxClient(buffer: ArrayBuffer, filename: string): 
       modifications: modifications.filter((m) => m.type === "MODIFY").length,
       additions: modifications.filter((m) => m.type === "ADD").length,
     },
+    sections: sectionResult.sections,
+    sourceLang: sectionResult.sourceLang,
+    documentXml: xmlContent,
   };
 }

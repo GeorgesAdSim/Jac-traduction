@@ -5,16 +5,19 @@ import { Loader as Loader2, CircleCheck as CheckCircle2, BookOpen, AlertTriangle
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import type { Modification } from '@/lib/types/docx';
+import type { LanguageSection } from '@/lib/docx-section-detector';
 
 const AVAILABLE_LANGUAGES = [
   { code: 'FR', name: 'Français' },
   { code: 'EN', name: 'Anglais' },
   { code: 'DE', name: 'Allemand' },
   { code: 'NL', name: 'Néerlandais' },
+  { code: 'RU', name: 'Russe' },
   { code: 'ES', name: 'Espagnol' },
   { code: 'IT', name: 'Italien' },
   { code: 'PL', name: 'Polonais' },
   { code: 'AR', name: 'Arabe' },
+  { code: 'PT', name: 'Portugais' },
 ];
 
 export interface LanguageResult {
@@ -23,18 +26,47 @@ export interface LanguageResult {
   stats: { translated: number; deleted: number; total: number };
 }
 
+export interface PropagationResult {
+  /** The fully modified document XML (source cleaned + all targets propagated) */
+  modifiedDocumentXml: string;
+  /** Per-language statistics */
+  languageStats: Array<{
+    language: string;
+    modifiedParagraphs: number;
+    totalParagraphs: number;
+  }>;
+  /** Legacy LanguageResult[] for CSV/JSON download compatibility */
+  legacyResults: LanguageResult[];
+}
+
 interface PropagationStepProps {
   modifications?: Modification[];
   sourceLang?: string;
-  onComplete: (results: LanguageResult[]) => void;
+  sections?: LanguageSection[];
+  documentXml?: string;
+  onComplete: (result: PropagationResult) => void;
 }
 
 export function PropagationStep({
   modifications,
-  sourceLang = 'FR',
+  sourceLang = 'EN',
+  sections,
+  documentXml,
   onComplete,
 }: PropagationStepProps) {
-  const [selectedLangs, setSelectedLangs] = useState<string[]>(['EN', 'DE', 'NL', 'ES']);
+  // Only show languages that are present in the document (minus the source)
+  const documentLangs = sections?.map((s) => s.lang) ?? [];
+  const availableForSelection = AVAILABLE_LANGUAGES.filter(
+    (l) => l.code !== sourceLang && documentLangs.includes(l.code)
+  );
+  // If no sections detected, fall back to full list minus source
+  const targetLangs = availableForSelection.length > 0
+    ? availableForSelection
+    : AVAILABLE_LANGUAGES.filter((l) => l.code !== sourceLang);
+
+  const defaultSelected = targetLangs.map((l) => l.code);
+
+  const [selectedLangs, setSelectedLangs] = useState<string[]>(defaultSelected);
   const [useGlossary, setUseGlossary] = useState(true);
   const [started, setStarted] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -42,10 +74,6 @@ export function PropagationStep({
   const [logs, setLogs] = useState<string[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const completeCalled = useRef(false);
-
-  const targetLangs = AVAILABLE_LANGUAGES.filter(
-    (l) => l.code !== sourceLang
-  );
 
   const toggleLang = (code: string) => {
     setSelectedLangs((prev) =>
@@ -58,37 +86,86 @@ export function PropagationStep({
   }, []);
 
   const startPropagation = useCallback(async () => {
-    if (!modifications || selectedLangs.length === 0) return;
+    if (!modifications || selectedLangs.length === 0 || !documentXml || !sections) return;
 
     setStarted(true);
     setProgress(0);
     const initialStatus: Record<string, 'pending'> = {};
     for (const lang of selectedLangs) initialStatus[lang] = 'pending';
     setLangStatus(initialStatus);
+
     addLog('Initialisation du traitement...');
 
-    const allResults: LanguageResult[] = [];
+    // Step 1: Clean source section
+    addLog('Nettoyage de la section source...');
+    const { cleanSourceSection } = await import('@/lib/docx-source-cleaner');
+    const { getParagraphTexts } = await import('@/lib/docx-rebuilder');
+
+    const sourceSection = sections.find((s) => s.isSource);
+    if (!sourceSection) {
+      addLog('ERREUR : Section source introuvable');
+      return;
+    }
+
+    const { cleanedXml, modifications: appliedMods } = cleanSourceSection(
+      documentXml,
+      sourceSection.startPara,
+      sourceSection.endPara
+    );
+
+    addLog(`${appliedMods.length} modifications appliquées à la section source`);
+
+    // Get source section text (after cleaning)
+    const sourceTexts = getParagraphTexts(
+      cleanedXml,
+      sourceSection.startPara,
+      sourceSection.endPara
+    );
+
+    // Step 2: Propagate to each target language
+    let currentXml = cleanedXml;
+    const languageStats: PropagationResult['languageStats'] = [];
+    const legacyResults: LanguageResult[] = [];
     const failedLangs: string[] = [];
 
     for (let i = 0; i < selectedLangs.length; i++) {
       const lang = selectedLangs[i];
       setLangStatus((prev) => ({ ...prev, [lang]: 'active' }));
-      addLog(`Traitement ${lang} en cours...`);
+      addLog(`Propagation ${lang} en cours...`);
+
+      const targetSection = sections.find((s) => s.lang === lang);
+      if (!targetSection) {
+        addLog(`AVERTISSEMENT : Section ${lang} introuvable dans le document`);
+        setLangStatus((prev) => ({ ...prev, [lang]: 'error' }));
+        setWarnings((prev) => [...prev, `${lang} : section introuvable`]);
+        failedLangs.push(lang);
+        setProgress(Math.round(((i + 1) / selectedLangs.length) * 100));
+        continue;
+      }
+
+      // Get target section text
+      const targetTexts = getParagraphTexts(
+        currentXml,
+        targetSection.startPara,
+        targetSection.endPara
+      );
 
       try {
-        const res = await fetch('/api/propagate/language', {
+        const res = await fetch('/api/propagate/apply', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            modifications,
+            sourceTexts,
+            targetTexts,
+            modifications: appliedMods,
+            sourceLang,
             targetLang: lang,
             useGlossary,
-            sourceLang,
           }),
         });
 
         const text = await res.text();
-        let data: LanguageResult;
+        let data: { language: string; modifiedTexts: string[]; stats: { totalParagraphs: number; modifiedParagraphs: number; modificationsApplied: number } };
         try {
           data = JSON.parse(text);
         } catch {
@@ -99,9 +176,67 @@ export function PropagationStep({
           throw new Error((data as unknown as { error: string }).error || `Erreur ${res.status}`);
         }
 
-        allResults.push(data);
+        // Apply the modified texts back into the document XML
+        // We need to update the text content within the XML paragraphs
+        const { replaceParagraphsInXml, getParagraphsXml } = await import('@/lib/docx-rebuilder');
+
+        // Get original target paragraphs XML
+        const targetParasXml = getParagraphsXml(
+          currentXml,
+          targetSection.startPara,
+          targetSection.endPara
+        );
+
+        // Replace text content in the XML
+        let modifiedTargetXml = targetParasXml;
+        for (let j = 0; j < targetTexts.length; j++) {
+          if (data.modifiedTexts[j] !== targetTexts[j] && targetTexts[j].trim()) {
+            // Replace the old text with new text in the XML
+            // We escape special XML chars in both old and new text
+            const oldText = targetTexts[j];
+            const newText = data.modifiedTexts[j];
+            if (oldText && modifiedTargetXml.includes(oldText)) {
+              modifiedTargetXml = modifiedTargetXml.replace(oldText, newText);
+            }
+          }
+        }
+
+        currentXml = replaceParagraphsInXml(
+          currentXml,
+          targetSection.startPara,
+          targetSection.endPara,
+          modifiedTargetXml
+        );
+
+        languageStats.push({
+          language: lang,
+          modifiedParagraphs: data.stats.modifiedParagraphs,
+          totalParagraphs: data.stats.totalParagraphs,
+        });
+
+        // Build legacy result for CSV/JSON export
+        const legacyMods = (modifications || []).map((mod) => {
+          const applied = appliedMods.find((a) => a.text === mod.originalText);
+          if (!applied) return { ...mod, status: 'skipped' as const };
+          if (applied.type === 'DELETE') return { ...mod, status: 'deleted' as const };
+          return {
+            ...mod,
+            translatedText: `[${lang}] ${mod.originalText}`,
+            status: 'translated' as const,
+          };
+        });
+        legacyResults.push({
+          language: lang,
+          modifications: legacyMods,
+          stats: {
+            translated: appliedMods.filter((m) => m.type !== 'DELETE').length,
+            deleted: appliedMods.filter((m) => m.type === 'DELETE').length,
+            total: appliedMods.length,
+          },
+        });
+
         setLangStatus((prev) => ({ ...prev, [lang]: 'done' }));
-        addLog(`Traitement ${lang} : ${data.stats.translated} traduite(s), ${data.stats.deleted} supprimée(s)`);
+        addLog(`${lang} : ${data.stats.modifiedParagraphs} paragraphe(s) modifié(s)`);
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Erreur inconnue';
         setLangStatus((prev) => ({ ...prev, [lang]: 'error' }));
@@ -110,14 +245,13 @@ export function PropagationStep({
         setWarnings((prev) => [...prev, `${lang} : ${message}`]);
       }
 
-      const pct = Math.round(((i + 1) / selectedLangs.length) * 100);
-      setProgress(pct);
+      setProgress(Math.round(((i + 1) / selectedLangs.length) * 100));
     }
 
+    // Final summary
     if (failedLangs.length > 0 && failedLangs.length < selectedLangs.length) {
       addLog(`Propagation terminée avec ${failedLangs.length} erreur(s)`);
     } else if (failedLangs.length === 0) {
-      addLog('Vérification de cohérence...');
       addLog('Propagation terminée avec succès');
     } else {
       addLog('Propagation échouée pour toutes les langues');
@@ -125,15 +259,45 @@ export function PropagationStep({
 
     setProgress(100);
 
-    if (allResults.length > 0 && !completeCalled.current) {
+    if (!completeCalled.current && (languageStats.length > 0 || failedLangs.length < selectedLangs.length)) {
       completeCalled.current = true;
-      setTimeout(() => onComplete(allResults), 800);
+      const result: PropagationResult = {
+        modifiedDocumentXml: currentXml,
+        languageStats,
+        legacyResults,
+      };
+      setTimeout(() => onComplete(result), 800);
     }
-  }, [modifications, selectedLangs, useGlossary, sourceLang, addLog, onComplete]);
+  }, [modifications, selectedLangs, useGlossary, sourceLang, sections, documentXml, addLog, onComplete]);
 
   if (!started) {
     return (
       <div className="mx-auto max-w-2xl space-y-6">
+        {/* Section detection info */}
+        {sections && sections.length > 0 && (
+          <div className="rounded border border-border bg-jac-bg-alt p-4">
+            <p className="text-xs font-medium text-jac-text-secondary mb-2">
+              Sections détectées dans le document :
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {sections.map((s) => (
+                <span
+                  key={s.lang}
+                  className={cn(
+                    'rounded px-2 py-1 text-xs font-medium',
+                    s.isSource
+                      ? 'bg-jac-red/10 text-jac-red border border-jac-red/30'
+                      : 'bg-white border border-border text-jac-dark'
+                  )}
+                >
+                  {s.lang} ({s.paragraphCount} §)
+                  {s.isSource && ' — source'}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="rounded border border-border bg-white p-6">
           <h3 className="mb-4 text-sm font-semibold text-jac-dark">
             Sélectionnez les langues cibles
@@ -187,7 +351,7 @@ export function PropagationStep({
 
         <Button
           onClick={startPropagation}
-          disabled={selectedLangs.length === 0}
+          disabled={selectedLangs.length === 0 || !documentXml || !sections}
           className="w-full"
         >
           Lancer la propagation ({selectedLangs.length} langue{selectedLangs.length > 1 ? 's' : ''})

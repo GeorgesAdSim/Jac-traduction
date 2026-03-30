@@ -20,4 +20,10 @@ export interface AnalysisResult {
     modifications: number;
     additions: number;
   };
+  /** Detected language sections in the document */
+  sections?: import('@/lib/docx-section-detector').LanguageSection[];
+  /** Auto-detected source language code */
+  sourceLang?: string;
+  /** Raw document XML for later use in propagation */
+  documentXml?: string;
 }
