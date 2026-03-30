@@ -10,7 +10,7 @@ import { AnalysisTable } from './analysis-table';
 import { ValidationStep } from './validation-step';
 import { PropagationStep } from './propagation-step';
 import { DownloadStep } from './download-step';
-import type { AnalysisResult } from '@/lib/types/docx';
+import type { AnalysisResult, Modification } from '@/lib/types/docx';
 
 const STEPS = ['Upload', 'Analyse', 'Validation', 'Propagation', 'Téléchargement'];
 
@@ -19,6 +19,8 @@ export default function PropagatePage() {
   const [file, setFile] = useState<File | null>(null);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [selectedModifications, setSelectedModifications] = useState<Modification[]>([]);
+  const [propagationResults, setPropagationResults] = useState<unknown>(null);
 
   const handleFileSelect = useCallback((f: File) => {
     setFile(f);
@@ -63,11 +65,20 @@ export default function PropagatePage() {
     setCurrentStep(3);
   }, []);
 
-  const handleStartPropagation = useCallback(() => {
-    setCurrentStep(4);
-  }, []);
+  const handleValidationContinue = useCallback(
+    (selectedIds: string[]) => {
+      if (!analysisResult) return;
+      const selected = analysisResult.modifications.filter((m) =>
+        selectedIds.includes(m.id)
+      );
+      setSelectedModifications(selected);
+      setCurrentStep(4);
+    },
+    [analysisResult]
+  );
 
-  const handlePropagationComplete = useCallback(() => {
+  const handlePropagationComplete = useCallback((results: unknown) => {
+    setPropagationResults(results);
     setCurrentStep(5);
   }, []);
 
@@ -134,16 +145,34 @@ export default function PropagatePage() {
           )}
 
           {currentStep === 3 && (
-            <ValidationStep onContinue={handleStartPropagation} />
+            <ValidationStep
+              modifications={analysisResult?.modifications}
+              onContinue={handleValidationContinue}
+            />
           )}
 
           {currentStep === 4 && (
-            <PropagationStep onComplete={handlePropagationComplete} />
+            <PropagationStep
+              modifications={selectedModifications}
+              sourceLang={analysisResult?.languages[0] || 'FR'}
+              onComplete={handlePropagationComplete}
+            />
           )}
 
-          {currentStep === 5 && <DownloadStep />}
+          {currentStep === 5 && (
+            <DownloadStep
+              results={propagationResults as DownloadStepProps_Results}
+              filename={file?.name}
+            />
+          )}
         </div>
       </div>
     </div>
   );
 }
+
+type DownloadStepProps_Results = {
+  language: string;
+  modifications: unknown[];
+  stats: { translated: number; deleted: number; total: number };
+}[];

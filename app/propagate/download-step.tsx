@@ -4,9 +4,47 @@ import { Download, CircleCheck as CheckCircle2, FileText } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 
-export function DownloadStep() {
-  const handleDownload = () => {
-    toast.success('Téléchargement lancé (simulation)');
+interface LanguageResult {
+  language: string;
+  modifications: unknown[];
+  stats: { translated: number; deleted: number; total: number };
+}
+
+interface DownloadStepProps {
+  results?: LanguageResult[];
+  filename?: string;
+}
+
+export function DownloadStep({ results, filename }: DownloadStepProps) {
+  const languages = results?.map((r) => r.language) ?? [];
+  const totalMods = results?.[0]?.stats.total ?? 0;
+
+  const handleDownload = (lang: string) => {
+    const result = results?.find((r) => r.language === lang);
+    if (!result) return;
+
+    const content = JSON.stringify(result, null, 2);
+    const blob = new Blob([content], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `propagation_${lang}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success(`Résultat ${lang} téléchargé`);
+  };
+
+  const handleDownloadAll = () => {
+    if (!results) return;
+    const content = JSON.stringify(results, null, 2);
+    const blob = new Blob([content], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'propagation_all.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success('Tous les résultats téléchargés');
   };
 
   return (
@@ -17,39 +55,44 @@ export function DownloadStep() {
           Propagation terminée
         </h3>
         <p className="mt-2 text-sm text-jac-text-secondary">
-          6 modifications propagées dans 5 langues (FR, DE, NL, ES, EN)
+          {totalMods} modification{totalMods > 1 ? 's' : ''} propagée{totalMods > 1 ? 's' : ''} dans {languages.length} langue{languages.length > 1 ? 's' : ''} ({languages.join(', ')})
         </p>
       </div>
 
       <div className="mt-6 space-y-3">
-        <h4 className="text-sm font-semibold text-jac-dark">Documents générés</h4>
-        {['Manuel_technique_FR.docx', 'Manuel_technique_DE.docx', 'Manuel_technique_NL.docx', 'Manuel_technique_ES.docx', 'Manuel_technique_EN.docx'].map(
-          (name) => (
-            <div
-              key={name}
-              className="flex items-center justify-between rounded border border-border bg-white px-4 py-3"
-            >
-              <div className="flex items-center gap-3">
-                <FileText className="h-5 w-5 text-jac-text-secondary" />
-                <span className="text-sm font-medium text-jac-dark">{name}</span>
+        <h4 className="text-sm font-semibold text-jac-dark">Résultats par langue</h4>
+        {(results ?? []).map((result) => (
+          <div
+            key={result.language}
+            className="flex items-center justify-between rounded border border-border bg-white px-4 py-3"
+          >
+            <div className="flex items-center gap-3">
+              <FileText className="h-5 w-5 text-jac-text-secondary" />
+              <div>
+                <span className="text-sm font-medium text-jac-dark">
+                  {filename ? filename.replace('.docx', `_${result.language}.docx`) : `Résultat_${result.language}`}
+                </span>
+                <p className="text-xs text-jac-text-secondary">
+                  {result.stats.translated} traduite(s), {result.stats.deleted} supprimée(s)
+                </p>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleDownload}
-              >
-                <Download className="mr-1.5 h-3.5 w-3.5" />
-                Télécharger
-              </Button>
             </div>
-          )
-        )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleDownload(result.language)}
+            >
+              <Download className="mr-1.5 h-3.5 w-3.5" />
+              Télécharger
+            </Button>
+          </div>
+        ))}
       </div>
 
       <div className="mt-6 flex justify-center">
-        <Button onClick={handleDownload}>
+        <Button onClick={handleDownloadAll}>
           <Download className="mr-2 h-4 w-4" />
-          Télécharger tout (.zip)
+          Télécharger tout
         </Button>
       </div>
     </div>

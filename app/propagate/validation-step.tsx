@@ -4,65 +4,49 @@ import { useState } from 'react';
 import { ArrowRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import type { Modification } from '@/lib/types/docx';
 
 interface ValidationStepProps {
-  onContinue: () => void;
+  modifications?: Modification[];
+  onContinue: (selectedIds: string[]) => void;
 }
 
-const ITEMS = [
-  {
-    id: 1,
-    text: 'Supprimer : "La vitesse de rotation du moteur pas-à-pas est de 200 tr/min"',
-    color: 'red' as const,
-  },
-  {
-    id: 2,
-    text: 'Supprimer : "Le cycle de nettoyage doit être effectué manuellement"',
-    color: 'red' as const,
-  },
-  {
-    id: 3,
-    text: 'Modifier : "Vérifier le capteur de défaut lame" → "...toutes les 50 heures"',
-    color: 'blue' as const,
-  },
-  {
-    id: 4,
-    text: 'Modifier : "Température maximale du four : 250°C" → "...280°C (nouveau modèle)"',
-    color: 'blue' as const,
-  },
-  {
-    id: 5,
-    text: 'Ajouter : "ATTENTION : Ne jamais dépasser 85°C lors du préchauffage du diviseur"',
-    color: 'green' as const,
-  },
-  {
-    id: 6,
-    text: 'Ajouter : "Le diviseur de pâte doit être calibré après chaque changement de lame"',
-    color: 'green' as const,
-  },
-];
-
 const DOT_COLORS = {
-  red: 'bg-red-500',
-  blue: 'bg-blue-500',
-  green: 'bg-green-500',
+  DELETE: 'bg-red-500',
+  MODIFY: 'bg-blue-500',
+  ADD: 'bg-green-500',
+  NONE: 'bg-gray-500',
 };
 
-export function ValidationStep({ onContinue }: ValidationStepProps) {
-  const [checked, setChecked] = useState<Record<number, boolean>>({
-    1: true,
-    2: true,
-    3: true,
-    4: true,
-    5: true,
-    6: true,
+const ACTION_LABELS = {
+  DELETE: 'Supprimer',
+  MODIFY: 'Modifier',
+  ADD: 'Ajouter',
+  NONE: '-',
+};
+
+export function ValidationStep({ modifications, onContinue }: ValidationStepProps) {
+  const items = modifications ?? [];
+  const [checked, setChecked] = useState<Record<string, boolean>>(() => {
+    const initial: Record<string, boolean> = {};
+    for (const mod of items) {
+      initial[mod.id] = true;
+    }
+    return initial;
   });
 
-  const toggle = (id: number) => {
+  const toggle = (id: string) => {
     setChecked((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
   const selectedCount = Object.values(checked).filter(Boolean).length;
+
+  const handleContinue = () => {
+    const selectedIds = Object.entries(checked)
+      .filter(([, v]) => v)
+      .map(([k]) => k);
+    onContinue(selectedIds);
+  };
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
@@ -72,11 +56,11 @@ export function ValidationStep({ onContinue }: ValidationStepProps) {
             Validez les modifications à propager
           </h3>
           <p className="mt-0.5 text-xs text-jac-text-secondary">
-            {selectedCount} sur {ITEMS.length} sélectionnées
+            {selectedCount} sur {items.length} sélectionnées
           </p>
         </div>
         <div className="divide-y divide-border">
-          {ITEMS.map((item) => (
+          {items.map((item) => (
             <label
               key={item.id}
               className="flex cursor-pointer items-start gap-3 px-4 py-3 transition-colors hover:bg-jac-bg-alt/50"
@@ -88,16 +72,23 @@ export function ValidationStep({ onContinue }: ValidationStepProps) {
                 className="mt-0.5 h-4 w-4 rounded border-border accent-jac-red"
               />
               <div className="flex items-center gap-2">
-                <span className={cn('h-2.5 w-2.5 rounded-full', DOT_COLORS[item.color])} />
-                <span className="text-sm text-jac-text">{item.text}</span>
+                <span className={cn('h-2.5 w-2.5 rounded-full', DOT_COLORS[item.type])} />
+                <span className="text-sm text-jac-text">
+                  {ACTION_LABELS[item.type]} : &quot;{item.originalText}&quot;
+                </span>
               </div>
             </label>
           ))}
+          {items.length === 0 && (
+            <p className="px-4 py-8 text-center text-sm text-jac-text-secondary">
+              Aucune modification à valider
+            </p>
+          )}
         </div>
       </div>
       <div className="flex justify-end">
         <Button
-          onClick={onContinue}
+          onClick={handleContinue}
           disabled={selectedCount === 0}
           className="w-full sm:w-auto"
         >

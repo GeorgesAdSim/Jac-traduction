@@ -9,7 +9,7 @@ interface TranslationConfigProps {
   targetLang: string;
   onSourceChange: (lang: string) => void;
   onTargetChange: (lang: string) => void;
-  onStart: () => void;
+  onStart: (useGlossary: boolean) => void;
 }
 
 const LANGUAGES = [
@@ -104,7 +104,7 @@ export function TranslationConfig({
       </div>
 
       <Button
-        onClick={onStart}
+        onClick={() => onStart(useGlossary)}
         disabled={sourceLang === targetLang}
         className="w-full"
       >

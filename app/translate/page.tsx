@@ -17,6 +17,10 @@ export default function TranslatePage() {
   const [file, setFile] = useState<File | null>(null);
   const [sourceLang, setSourceLang] = useState('FR');
   const [targetLang, setTargetLang] = useState('EN');
+  const [useGlossary, setUseGlossary] = useState(true);
+  const [progress, setProgress] = useState(0);
+  const [resultBlob, setResultBlob] = useState<Blob | null>(null);
+  const [resultFilename, setResultFilename] = useState('');
 
   const handleFileSelect = useCallback((f: File) => {
     setFile(f);
@@ -27,13 +31,26 @@ export default function TranslatePage() {
     setCurrentStep(2);
   }, []);
 
-  const handleStartTranslation = useCallback(() => {
-    setCurrentStep(3);
-    toast.info(`Traduction ${sourceLang} → ${targetLang} en cours...`);
-  }, [sourceLang, targetLang]);
+  const handleStartTranslation = useCallback(
+    (glossary: boolean) => {
+      setUseGlossary(glossary);
+      setProgress(0);
+      setCurrentStep(3);
+      toast.info(`Traduction ${sourceLang} → ${targetLang} en cours...`);
+    },
+    [sourceLang, targetLang]
+  );
 
-  const handleTranslationComplete = useCallback(() => {
+  const handleTranslationComplete = useCallback((blob: Blob, filename: string) => {
+    setResultBlob(blob);
+    setResultFilename(filename);
     setCurrentStep(4);
+    toast.success('Traduction terminée');
+  }, []);
+
+  const handleTranslationError = useCallback((message: string) => {
+    toast.error(message);
+    setCurrentStep(2);
   }, []);
 
   return (
@@ -77,7 +94,12 @@ export default function TranslatePage() {
             <TranslationProgress
               sourceLang={sourceLang}
               targetLang={targetLang}
+              file={file}
+              useGlossary={useGlossary}
+              progress={progress}
+              onProgress={setProgress}
               onComplete={handleTranslationComplete}
+              onError={handleTranslationError}
             />
           )}
 
@@ -85,6 +107,8 @@ export default function TranslatePage() {
             <TranslationResult
               sourceLang={sourceLang}
               targetLang={targetLang}
+              blob={resultBlob}
+              filename={resultFilename}
             />
           )}
         </div>

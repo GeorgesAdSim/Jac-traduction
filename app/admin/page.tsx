@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { toast } from 'sonner';
 import {
   FileText,
@@ -18,13 +18,6 @@ interface KpiCard {
   icon: React.ReactNode;
   change?: string;
 }
-
-const KPI_CARDS: KpiCard[] = [
-  { label: 'Documents traités', value: '247', icon: <FileText className="h-5 w-5" />, change: '+12 ce mois' },
-  { label: 'Termes glossaire', value: '1,842', icon: <BookOpen className="h-5 w-5" />, change: '+38 ce mois' },
-  { label: 'Langues actives', value: '9', icon: <Globe className="h-5 w-5" /> },
-  { label: 'Crédits API restants', value: '8,450', icon: <Zap className="h-5 w-5" />, change: '85% du quota' },
-];
 
 interface Language {
   code: string;
@@ -67,15 +60,44 @@ const STATUS_CONFIG = {
   error: { label: 'Erreur', className: 'bg-red-100 text-red-700' },
 };
 
+const STORAGE_KEY = 'docpropag-languages';
+
 export default function AdminPage() {
   const [languages, setLanguages] = useState<Language[]>(INITIAL_LANGUAGES);
+  const [glossaryCount, setGlossaryCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    // Restore language settings from localStorage
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) {
+      try {
+        setLanguages(JSON.parse(stored));
+      } catch {
+        // ignore invalid JSON
+      }
+    }
+
+    // Fetch glossary count
+    fetch('/api/glossary')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.terms) {
+          setGlossaryCount(data.terms.length);
+        }
+      })
+      .catch(() => {
+        // Glossary API not available yet
+      });
+  }, []);
 
   const toggleLanguage = (code: string) => {
-    setLanguages((prev) =>
-      prev.map((l) =>
+    setLanguages((prev) => {
+      const updated = prev.map((l) =>
         l.code === code ? { ...l, enabled: !l.enabled } : l
-      )
-    );
+      );
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      return updated;
+    });
     const lang = languages.find((l) => l.code === code);
     if (lang) {
       toast.success(
@@ -83,6 +105,15 @@ export default function AdminPage() {
       );
     }
   };
+
+  const activeCount = languages.filter((l) => l.enabled).length;
+
+  const kpiCards: KpiCard[] = [
+    { label: 'Documents traités', value: '247', icon: <FileText className="h-5 w-5" />, change: '+12 ce mois' },
+    { label: 'Termes glossaire', value: glossaryCount !== null ? String(glossaryCount) : '...', icon: <BookOpen className="h-5 w-5" />, change: glossaryCount !== null ? 'Depuis Supabase' : 'Chargement...' },
+    { label: 'Langues actives', value: String(activeCount), icon: <Globe className="h-5 w-5" /> },
+    { label: 'Crédits API restants', value: '8,450', icon: <Zap className="h-5 w-5" />, change: '85% du quota' },
+  ];
 
   return (
     <div className="bg-jac-bg-alt px-4 py-10 sm:px-6">
@@ -95,7 +126,7 @@ export default function AdminPage() {
         </p>
 
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {KPI_CARDS.map((kpi) => (
+          {kpiCards.map((kpi) => (
             <div
               key={kpi.label}
               className="rounded border border-border bg-white p-5 shadow-sm"
@@ -119,13 +150,13 @@ export default function AdminPage() {
             <div>
               <h2 className="text-base font-semibold text-jac-dark">Langues</h2>
               <p className="mt-0.5 text-xs text-jac-text-secondary">
-                {languages.filter((l) => l.enabled).length} langues actives
+                {activeCount} langues actives
               </p>
             </div>
             <Button
               variant="outline"
               size="sm"
-              onClick={() => toast.info('Ajout de langue (simulation)')}
+              onClick={() => toast.info('Ajout de langue (bientôt disponible)')}
             >
               <Plus className="mr-1.5 h-3.5 w-3.5" />
               Ajouter
@@ -176,21 +207,11 @@ export default function AdminPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border bg-jac-bg-alt">
-                  <th className="px-5 py-3 text-left font-semibold text-jac-dark">
-                    Date
-                  </th>
-                  <th className="px-5 py-3 text-left font-semibold text-jac-dark">
-                    Document
-                  </th>
-                  <th className="px-5 py-3 text-left font-semibold text-jac-dark">
-                    Mode
-                  </th>
-                  <th className="px-5 py-3 text-left font-semibold text-jac-dark">
-                    Langues
-                  </th>
-                  <th className="px-5 py-3 text-left font-semibold text-jac-dark">
-                    Statut
-                  </th>
+                  <th className="px-5 py-3 text-left font-semibold text-jac-dark">Date</th>
+                  <th className="px-5 py-3 text-left font-semibold text-jac-dark">Document</th>
+                  <th className="px-5 py-3 text-left font-semibold text-jac-dark">Mode</th>
+                  <th className="px-5 py-3 text-left font-semibold text-jac-dark">Langues</th>
+                  <th className="px-5 py-3 text-left font-semibold text-jac-dark">Statut</th>
                 </tr>
               </thead>
               <tbody>
