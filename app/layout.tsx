@@ -25,7 +25,7 @@ export default function RootLayout({
           <main className="flex-1">{children}</main>
           <Footer />
         </div>
-        <Toaster position="bottom-right" richColors />
+        <Toaster position="top-right" richColors duration={3000} visibleToasts={2} closeButton />
       </body>
     </html>
   );
