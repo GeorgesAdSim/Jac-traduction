@@ -1,16 +1,27 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { GlossaryTerm } from './types/glossary';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+let supabaseClient: SupabaseClient | null = null;
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+function getSupabaseClient(): SupabaseClient {
+  if (!supabaseClient) {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+    if (!supabaseUrl || !supabaseKey) {
+      throw new Error('Variables d\'environnement Supabase non configurées (NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY)');
+    }
+
+    supabaseClient = createClient(supabaseUrl, supabaseKey);
+  }
+  return supabaseClient;
+}
 
 export async function getTerms(
   sourceLang?: string,
   targetLang?: string
 ): Promise<GlossaryTerm[]> {
-  let query = supabase.from('glossary').select('*').order('created_at', { ascending: false });
+  let query = getSupabaseClient().from('glossary').select('*').order('created_at', { ascending: false });
 
   if (sourceLang) {
     query = query.eq('source_lang', sourceLang);
@@ -29,7 +40,7 @@ export async function searchTerms(
   sourceLang?: string,
   targetLang?: string
 ): Promise<GlossaryTerm[]> {
-  let query = supabase
+  let query = getSupabaseClient()
     .from('glossary')
     .select('*')
     .or(`source_term.ilike.%${searchQuery}%,translated_term.ilike.%${searchQuery}%`)
@@ -50,7 +61,7 @@ export async function searchTerms(
 export async function addTerm(
   term: Omit<GlossaryTerm, 'id' | 'created_at' | 'updated_at'>
 ): Promise<GlossaryTerm> {
-  const { data, error } = await supabase
+  const { data, error } = await getSupabaseClient()
     .from('glossary')
     .insert(term)
     .select()
@@ -64,7 +75,7 @@ export async function updateTerm(
   id: string,
   updates: Partial<Omit<GlossaryTerm, 'id' | 'created_at' | 'updated_at'>>
 ): Promise<GlossaryTerm> {
-  const { data, error } = await supabase
+  const { data, error } = await getSupabaseClient()
     .from('glossary')
     .update({ ...updates, updated_at: new Date().toISOString() })
     .eq('id', id)
@@ -76,12 +87,12 @@ export async function updateTerm(
 }
 
 export async function deleteTerm(id: string): Promise<void> {
-  const { error } = await supabase.from('glossary').delete().eq('id', id);
+  const { error } = await getSupabaseClient().from('glossary').delete().eq('id', id);
   if (error) throw new Error(`Erreur suppression terme: ${error.message}`);
 }
 
 export async function getTermCount(): Promise<number> {
-  const { count, error } = await supabase
+  const { count, error } = await getSupabaseClient()
     .from('glossary')
     .select('*', { count: 'exact', head: true });
 

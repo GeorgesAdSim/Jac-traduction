@@ -1,9 +1,18 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { GlossaryTerm } from './types/glossary';
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+let anthropicClient: Anthropic | null = null;
+
+function getAnthropicClient(): Anthropic {
+  if (!anthropicClient) {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      throw new Error('Variable d\'environnement ANTHROPIC_API_KEY non configurée');
+    }
+    anthropicClient = new Anthropic({ apiKey });
+  }
+  return anthropicClient;
+}
 
 interface TranslateTextParams {
   text: string;
@@ -94,7 +103,7 @@ export async function translateText({
   }
 
   const response = await callWithRetry(() =>
-    anthropic.messages.create({
+    getAnthropicClient().messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 4096,
       system: systemPrompt,
@@ -142,7 +151,7 @@ export async function translateBatch({
 ${numberedTexts}`;
 
   const response = await callWithRetry(() =>
-    anthropic.messages.create({
+    getAnthropicClient().messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 8192,
       system: systemPrompt,
