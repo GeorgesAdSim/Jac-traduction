@@ -10,6 +10,31 @@
 
 /* eslint-disable no-restricted-globals */
 
+// ── Caches (keyed by xml.length — different XMLs have different lengths) ─────
+
+var _paraCache = {};
+var _trCache = {};
+
+function findParagraphPositionsCached(xml) {
+  var key = xml.length;
+  if (_paraCache[key]) return _paraCache[key];
+  self.postMessage({ type: 'progress', step: 'Scan', detail: 'Scan des paragraphes (' + Math.round(xml.length / 1024 / 1024 * 10) / 10 + ' Mo)...' });
+  var result = findParagraphPositions(xml);
+  self.postMessage({ type: 'progress', step: 'Scan', detail: result.length + ' paragraphes trouvés' });
+  _paraCache[key] = result;
+  return result;
+}
+
+function findTableRowBoundariesCached(xml) {
+  var key = xml.length;
+  if (_trCache[key]) return _trCache[key];
+  self.postMessage({ type: 'progress', step: 'Scan', detail: 'Scan des lignes de tableau...' });
+  var result = findTableRowBoundaries(xml);
+  self.postMessage({ type: 'progress', step: 'Scan', detail: result.length + ' lignes de tableau trouvées' });
+  _trCache[key] = result;
+  return result;
+}
+
 // ── Paragraph positions ──────────────────────────────────────────
 
 function findParagraphPositions(xml) {
@@ -109,7 +134,7 @@ var LANG_MARKERS = {
 };
 
 function detectSectionsInRawXml(xml) {
-  var positions = findParagraphPositions(xml);
+  var positions = findParagraphPositionsCached(xml);
   var markers = [];
 
   for (var i = 0; i < positions.length; i++) {
@@ -224,7 +249,7 @@ function removeHighlight(xml) {
 }
 
 function cleanSourceSection(fullXml, sourceStartPara, sourceEndPara, mode) {
-  var paraPositions = findParagraphPositions(fullXml);
+  var paraPositions = findParagraphPositionsCached(fullXml);
   var modifications = [];
   var replacements = [];
 
@@ -408,7 +433,7 @@ function isHeadingParagraph(paraXml, xml, paraStart) {
 
 function splitSectionIntoChapters(xml, sectionStartPara, sectionEndPara, maxParagraphsPerChapter) {
   maxParagraphsPerChapter = maxParagraphsPerChapter || 50;
-  var positions = findParagraphPositions(xml);
+  var positions = findParagraphPositionsCached(xml);
   var chapters = [];
 
   var contentStart = sectionStartPara + 1;
@@ -478,7 +503,7 @@ function splitSectionIntoChapters(xml, sectionStartPara, sectionEndPara, maxPara
 }
 
 function formatChapterText(xml, chapter) {
-  var positions = findParagraphPositions(xml);
+  var positions = findParagraphPositionsCached(xml);
   var lines = [];
 
   for (var i = chapter.startParaIdx; i <= chapter.endParaIdx && i < positions.length; i++) {
@@ -492,8 +517,8 @@ function formatChapterText(xml, chapter) {
 }
 
 function formatChapterTextWithTables(xml, chapter) {
-  var positions = findParagraphPositions(xml);
-  var trBoundaries = findTableRowBoundaries(xml);
+  var positions = findParagraphPositionsCached(xml);
+  var trBoundaries = findTableRowBoundariesCached(xml);
 
   var lines = [];
   // Use plain objects + arrays instead of Map/Set for serialization
