@@ -8,6 +8,11 @@ import type { Modification } from '@/lib/types/docx';
 import type { LanguageSection } from '@/lib/docx-section-detector';
 import type { RawSection } from '@/lib/docx-rebuilder';
 
+/** Yield to the main thread so the browser stays responsive during heavy processing. */
+function yieldToMain(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
 const AVAILABLE_LANGUAGES = [
   { code: 'FR', name: 'Français' },
   { code: 'EN', name: 'Anglais' },
@@ -93,9 +98,9 @@ export function PropagationStep({
     addLog('Initialisation du traitement (approche par chapitres)...');
 
     // === STEP 1: Clean source section ===
-    addLog('Nettoyage de la section source...');
+    addLog('Nettoyage de la section source (cela peut prendre quelques secondes pour les gros fichiers)...');
     const { cleanSourceSection } = await import('@/lib/docx-source-cleaner');
-    const { detectSectionsInRawXml, applyModificationsToSection } = await import('@/lib/docx-rebuilder');
+    const { detectSectionsInRawXml, applyModificationsToSection, clearXmlCaches } = await import('@/lib/docx-rebuilder');
     const {
       splitSectionIntoChapters,
       formatChapterText,
@@ -103,6 +108,8 @@ export function PropagationStep({
       parseChapterResponse,
       buildChapterModificationsWithTables,
     } = await import('@/lib/docx-chapter-splitter');
+
+    await yieldToMain();
 
     const rawSections = detectSectionsInRawXml(documentXml);
     const rawSourceSection = rawSections.find((s) => s.lang === sourceLang);
@@ -112,6 +119,8 @@ export function PropagationStep({
     }
     addLog(`Section source ${sourceLang} : paras ${rawSourceSection.startPara}-${rawSourceSection.endPara}`);
 
+    await yieldToMain();
+
     // "After" state: removes RED deletions, keeps GREEN additions (current behavior)
     const { cleanedXml, modifications: appliedMods } = cleanSourceSection(
       documentXml,
@@ -119,6 +128,8 @@ export function PropagationStep({
       rawSourceSection.endPara,
       'after',
     );
+
+    await yieldToMain();
 
     // "Before" state: removes GREEN additions, keeps RED deletions
     const { cleanedXml: beforeXml } = cleanSourceSection(
@@ -128,9 +139,11 @@ export function PropagationStep({
       'before',
     );
 
+    await yieldToMain();
     addLog(`${appliedMods.length} modifications détectées dans la section source`);
 
     // === STEP 2: Split source into chapters (before and after) ===
+    addLog('Découpage en chapitres...');
     const beforeSections = detectSectionsInRawXml(beforeXml);
     const beforeSourceSection = beforeSections.find((s) => s.lang === sourceLang);
     if (!beforeSourceSection) {
@@ -142,6 +155,8 @@ export function PropagationStep({
       beforeSourceSection.startPara,
       beforeSourceSection.endPara,
     );
+
+    await yieldToMain();
 
     const newSections = detectSectionsInRawXml(cleanedXml);
     const cleanedSource = newSections.find((s) => s.lang === sourceLang);
@@ -155,6 +170,8 @@ export function PropagationStep({
       cleanedSource.startPara,
       cleanedSource.endPara,
     );
+
+    await yieldToMain();
 
     addLog(`Source AVANT : ${sourceBeforeChapters.length} chapitres`);
     for (const ch of sourceBeforeChapters) {
@@ -171,12 +188,16 @@ export function PropagationStep({
     }
 
     // === STEP 3: Find which chapters changed ===
+    addLog('Comparaison des chapitres avant/après...');
     const maxChapters = Math.min(sourceBeforeChapters.length, sourceAfterChapters.length);
     const sourceBeforeTableTexts: string[] = [];
     const sourceAfterTableTexts: string[] = [];
     const changedChapterIndices: number[] = [];
 
     for (let i = 0; i < maxChapters; i++) {
+      // Yield every 5 chapters to keep UI responsive
+      if (i > 0 && i % 5 === 0) await yieldToMain();
+
       // Plain text for comparison
       const beforeText = formatChapterText(beforeXml, sourceBeforeChapters[i]);
       const afterText = formatChapterText(cleanedXml, sourceAfterChapters[i]);
@@ -236,8 +257,12 @@ export function PropagationStep({
       const { lang } = orderedTargets[i];
       setLangStatus((prev) => ({ ...prev, [lang]: 'active' }));
       addLog(`Propagation ${lang} en cours...`);
+      await yieldToMain();
 
       try {
+        // Clear caches since currentXml changes between languages
+        clearXmlCaches();
+
         // Re-detect sections in current XML for accurate boundaries
         const currentSections = detectSectionsInRawXml(currentXml);
         const currentTarget = currentSections.find((s) => s.lang === lang);

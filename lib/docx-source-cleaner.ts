@@ -9,6 +9,7 @@
  */
 
 import type { ModificationType } from './types/docx';
+import { findParagraphPositions } from './docx-rebuilder';
 
 export interface AppliedModification {
   type: ModificationType;
@@ -35,56 +36,6 @@ function highlightToType(val: string): ModificationType {
     default:
       return 'NONE';
   }
-}
-
-/**
- * Find all <w:p> paragraph boundaries using indexOf.
- */
-function findParagraphPositions(xml: string): Array<{ start: number; end: number }> {
-  const positions: Array<{ start: number; end: number }> = [];
-  const openTag = '<w:p';
-  const closeTag = '</w:p>';
-  let searchFrom = 0;
-
-  while (searchFrom < xml.length) {
-    const openIdx = xml.indexOf(openTag, searchFrom);
-    if (openIdx === -1) break;
-
-    const charAfterTag = xml[openIdx + openTag.length];
-    if (charAfterTag !== '>' && charAfterTag !== ' ') {
-      searchFrom = openIdx + openTag.length;
-      continue;
-    }
-
-    let depth = 1;
-    let pos = openIdx + openTag.length;
-    while (depth > 0 && pos < xml.length) {
-      const nextOpen = xml.indexOf(openTag, pos);
-      const nextClose = xml.indexOf(closeTag, pos);
-
-      if (nextClose === -1) break;
-
-      if (nextOpen !== -1 && nextOpen < nextClose) {
-        const charAfter = xml[nextOpen + openTag.length];
-        if (charAfter === '>' || charAfter === ' ') {
-          depth++;
-        }
-        pos = nextOpen + openTag.length;
-      } else {
-        depth--;
-        if (depth === 0) {
-          positions.push({ start: openIdx, end: nextClose + closeTag.length });
-        }
-        pos = nextClose + closeTag.length;
-      }
-    }
-
-    searchFrom = positions.length > 0
-      ? positions[positions.length - 1].end
-      : openIdx + openTag.length;
-  }
-
-  return positions;
 }
 
 /**

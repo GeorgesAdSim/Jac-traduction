@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { toast } from 'sonner';
 import { Play, CircleCheck as CheckCircle2, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -22,6 +22,7 @@ export default function PropagatePage() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [selectedModifications, setSelectedModifications] = useState<Modification[]>([]);
   const [propagationResult, setPropagationResult] = useState<PropagationResult | null>(null);
+  const documentXmlRef = useRef<string>('');
 
   const handleFileSelect = useCallback((f: File) => {
     const maxSizeMB = 50;
@@ -44,7 +45,9 @@ export default function PropagatePage() {
       const buffer = await file.arrayBuffer();
       const analysisData = await analyzeDocxClient(buffer, file.name);
 
-      setAnalysisResult(analysisData);
+      // Store heavy XML in ref to avoid re-render overhead (5+ MB string)
+      documentXmlRef.current = analysisData.documentXml || '';
+      setAnalysisResult({ ...analysisData, documentXml: undefined });
       setCurrentStep(2);
 
       const total = analysisData.modifications?.length ?? 0;
@@ -159,7 +162,7 @@ export default function PropagatePage() {
               modifications={selectedModifications}
               sourceLang={analysisResult?.sourceLang || 'EN'}
               sections={analysisResult?.sections}
-              documentXml={analysisResult?.documentXml}
+              documentXml={documentXmlRef.current || analysisResult?.documentXml}
               onComplete={handlePropagationComplete}
             />
           )}

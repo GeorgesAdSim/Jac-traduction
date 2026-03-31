@@ -6,6 +6,58 @@
 
 import JSZip from 'jszip';
 
+// ── Paragraph position cache ──────────────────────────────────────────
+// Avoids re-scanning multi-MB XML strings that haven't changed.
+// Keyed by (length + 100-char sample) which is unique enough in practice.
+const _posCache: Array<{ len: number; sample: string; positions: Array<{ start: number; end: number }> }> = [];
+const POS_CACHE_MAX = 4;
+
+function _posCacheKey(xml: string): string {
+  return xml.length > 200 ? xml.substring(100, 200) : xml.substring(0, Math.min(100, xml.length));
+}
+
+function _getCachedPositions(xml: string): Array<{ start: number; end: number }> | null {
+  const len = xml.length;
+  const sample = _posCacheKey(xml);
+  for (const entry of _posCache) {
+    if (entry.len === len && entry.sample === sample) return entry.positions;
+  }
+  return null;
+}
+
+function _setCachedPositions(xml: string, positions: Array<{ start: number; end: number }>): void {
+  const len = xml.length;
+  const sample = _posCacheKey(xml);
+  if (_posCache.length >= POS_CACHE_MAX) _posCache.shift();
+  _posCache.push({ len, sample, positions });
+}
+
+// ── Table row boundary cache ──────────────────────────────────────────
+const _trCache: Array<{ len: number; sample: string; rows: Array<{ start: number; end: number }> }> = [];
+const TR_CACHE_MAX = 4;
+
+function _getCachedTrBounds(xml: string): Array<{ start: number; end: number }> | null {
+  const len = xml.length;
+  const sample = _posCacheKey(xml);
+  for (const entry of _trCache) {
+    if (entry.len === len && entry.sample === sample) return entry.rows;
+  }
+  return null;
+}
+
+function _setCachedTrBounds(xml: string, rows: Array<{ start: number; end: number }>): void {
+  const len = xml.length;
+  const sample = _posCacheKey(xml);
+  if (_trCache.length >= TR_CACHE_MAX) _trCache.shift();
+  _trCache.push({ len, sample, rows });
+}
+
+/** Clear all XML position caches (call after modifying XML). */
+export function clearXmlCaches(): void {
+  _posCache.length = 0;
+  _trCache.length = 0;
+}
+
 /**
  * Rebuild a .docx file with the modified document.xml.
  */
@@ -34,6 +86,9 @@ export async function rebuildDocx(
  * Returns start/end character positions for each paragraph.
  */
 export function findParagraphPositions(xml: string): Array<{ start: number; end: number }> {
+  const cached = _getCachedPositions(xml);
+  if (cached) return cached;
+
   const positions: Array<{ start: number; end: number }> = [];
   const openTag = '<w:p';
   const closeTag = '</w:p>';
@@ -81,6 +136,7 @@ export function findParagraphPositions(xml: string): Array<{ start: number; end:
       : openIdx + openTag.length;
   }
 
+  _setCachedPositions(xml, positions);
   return positions;
 }
 
@@ -116,6 +172,9 @@ export function extractParaText(paraXml: string): string {
  * Find all <w:tr> table row boundaries in the XML.
  */
 export function findTableRowBoundaries(xml: string): Array<{ start: number; end: number }> {
+  const cached = _getCachedTrBounds(xml);
+  if (cached) return cached;
+
   const rows: Array<{ start: number; end: number }> = [];
   let pos = 0;
   while (pos < xml.length) {
@@ -131,6 +190,8 @@ export function findTableRowBoundaries(xml: string): Array<{ start: number; end:
     rows.push({ start: openIdx, end: closeIdx + 7 });
     pos = closeIdx + 7;
   }
+
+  _setCachedTrBounds(xml, rows);
   return rows;
 }
 
@@ -354,6 +415,9 @@ export function applyModificationsToSection(
   sectionStartPara: number,
   modifications: SectionModification[]
 ): string {
+  // Invalidate caches since we'll be mutating XML
+  clearXmlCaches();
+
   // Sort by relative index DESCENDING (last paragraph first).
   // For same index: insert_after before delete_paragraph (insert must happen
   // while the target paragraph still exists at that position).
