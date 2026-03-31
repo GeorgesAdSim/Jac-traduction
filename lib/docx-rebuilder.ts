@@ -348,7 +348,15 @@ export function applyModificationsToSection(
     const positions = findParagraphPositions(currentXml);
     const absIdx = sectionStartPara + mod.relativeParagraphIndex;
 
-    if (absIdx < 0 || absIdx >= positions.length) continue;
+    if (absIdx < 0 || absIdx >= positions.length) {
+      // For insert_after, clamp to the last paragraph if index is just beyond section end
+      if (mod.action === 'insert_after' && absIdx === positions.length && positions.length > 0) {
+        const lastPos = positions[positions.length - 1];
+        const newPara = `<w:p><w:r><w:t xml:space="preserve">${escapeXml(mod.newText || '')}</w:t></w:r></w:p>`;
+        currentXml = currentXml.substring(0, lastPos.end) + newPara + currentXml.substring(lastPos.end);
+      }
+      continue;
+    }
 
     const { start, end } = positions[absIdx];
 

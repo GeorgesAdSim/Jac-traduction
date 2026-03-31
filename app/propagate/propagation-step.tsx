@@ -120,16 +120,22 @@ export function PropagationStep({
     const { cleanSourceSection } = await import('@/lib/docx-source-cleaner');
     const { getParagraphTexts, detectSectionsInRawXml, applyModificationsToSection } = await import('@/lib/docx-rebuilder');
 
-    const sourceSection = sections.find((s) => s.isSource);
-    if (!sourceSection) {
+    // Detect sections using raw XML (consistent with findParagraphPositions).
+    // The fast-xml-parser section detector only counts direct body children,
+    // but findParagraphPositions counts ALL <w:p> including table cells.
+    // Using detectSectionsInRawXml ensures correct paragraph indices.
+    const rawSections = detectSectionsInRawXml(documentXml);
+    const rawSourceSection = rawSections.find((s) => s.lang === sourceLang);
+    if (!rawSourceSection) {
       addLog('ERREUR : Section source introuvable');
       return;
     }
+    addLog(`Section source ${sourceLang} : paras ${rawSourceSection.startPara}-${rawSourceSection.endPara}`);
 
     const { cleanedXml, modifications: appliedMods } = cleanSourceSection(
       documentXml,
-      sourceSection.startPara,
-      sourceSection.endPara
+      rawSourceSection.startPara,
+      rawSourceSection.endPara
     );
 
     addLog(`${appliedMods.length} modifications détectées dans la section source`);
@@ -164,8 +170,8 @@ export function PropagationStep({
     // 2d. Get original source texts (before cleaning) for alignment computation
     const originalSourceTexts = getParagraphTexts(
       documentXml,
-      sourceSection.startPara,
-      sourceSection.endPara
+      rawSourceSection.startPara,
+      rawSourceSection.endPara
     );
 
     // 2e. Get cleaned paragraph texts for each modified (non-deleted) paragraph
@@ -177,7 +183,7 @@ export function PropagationStep({
       for (const delKey of Object.keys(deletedParas)) {
         if (Number(delKey) < relIdx) offset++;
       }
-      const cleanedAbsIdx = sourceSection.startPara + relIdx - offset;
+      const cleanedAbsIdx = rawSourceSection.startPara + relIdx - offset;
       const texts = getParagraphTexts(cleanedXml, cleanedAbsIdx, cleanedAbsIdx);
       cleanedParaTexts[relIdx] = texts[0] || '';
     }
