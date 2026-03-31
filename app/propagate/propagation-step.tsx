@@ -13,6 +13,23 @@ function yieldToMain(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
+/** Worker result from the heavy XML processing */
+interface WorkerResult {
+  cleanedXml: string;
+  beforeXml: string;
+  rawSections: RawSection[];
+  newSections: RawSection[];
+  appliedModsCount: number;
+  sourceBeforeChapters: Array<{ title: string; startParaIdx: number; endParaIdx: number; paragraphCount: number }>;
+  sourceAfterChapters: Array<{ title: string; startParaIdx: number; endParaIdx: number; paragraphCount: number }>;
+  sourceBeforeTableTexts: string[];
+  sourceAfterTableTexts: string[];
+  changedChapterIndices: number[];
+  maxChapters: number;
+  chapterLogs: Array<{ index: number; title: string; beforeLines: number; afterLines: number; isChanged: boolean; snippet: string }>;
+  mismatchChapterCount: boolean;
+}
+
 const AVAILABLE_LANGUAGES = [
   { code: 'FR', name: 'Français' },
   { code: 'EN', name: 'Anglais' },
@@ -96,83 +113,52 @@ export function PropagationStep({
     setLangStatus(initialStatus);
 
     addLog('Initialisation du traitement (approche par chapitres)...');
+    addLog('Préparation du document (Web Worker — pas de freeze navigateur)...');
 
-    // === STEP 1: Clean source section ===
-    addLog('Nettoyage de la section source (cela peut prendre quelques secondes pour les gros fichiers)...');
-    const { cleanSourceSection } = await import('@/lib/docx-source-cleaner');
-    const { detectSectionsInRawXml, applyModificationsToSection, clearXmlCaches } = await import('@/lib/docx-rebuilder');
+    // === STEP 1-3: Heavy XML processing in Web Worker ===
+    const worker = new Worker('/propagation-worker.js');
+
+    let workerResult: WorkerResult;
+    try {
+      workerResult = await new Promise<WorkerResult>((resolve, reject) => {
+        worker.onmessage = (e: MessageEvent) => {
+          if (e.data.type === 'progress') {
+            addLog(`${e.data.step}: ${e.data.detail}`);
+          } else if (e.data.type === 'result') {
+            resolve(e.data as WorkerResult);
+          } else if (e.data.type === 'error') {
+            reject(new Error(e.data.message));
+          }
+        };
+        worker.onerror = (e) => reject(new Error(e.message));
+        worker.postMessage({ type: 'prepare', xml: documentXml, sourceLang });
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Erreur inconnue';
+      addLog(`ERREUR Worker : ${message}`);
+      worker.terminate();
+      return;
+    }
+    worker.terminate();
+
+    // Unpack worker results
     const {
-      splitSectionIntoChapters,
-      formatChapterText,
-      formatChapterTextWithTables,
-      parseChapterResponse,
-      buildChapterModificationsWithTables,
-    } = await import('@/lib/docx-chapter-splitter');
-
-    await yieldToMain();
-
-    const rawSections = detectSectionsInRawXml(documentXml);
-    const rawSourceSection = rawSections.find((s) => s.lang === sourceLang);
-    if (!rawSourceSection) {
-      addLog('ERREUR : Section source introuvable');
-      return;
-    }
-    addLog(`Section source ${sourceLang} : paras ${rawSourceSection.startPara}-${rawSourceSection.endPara}`);
-
-    await yieldToMain();
-
-    // "After" state: removes RED deletions, keeps GREEN additions (current behavior)
-    const { cleanedXml, modifications: appliedMods } = cleanSourceSection(
-      documentXml,
-      rawSourceSection.startPara,
-      rawSourceSection.endPara,
-      'after',
-    );
-
-    await yieldToMain();
-
-    // "Before" state: removes GREEN additions, keeps RED deletions
-    const { cleanedXml: beforeXml } = cleanSourceSection(
-      documentXml,
-      rawSourceSection.startPara,
-      rawSourceSection.endPara,
-      'before',
-    );
-
-    await yieldToMain();
-    addLog(`${appliedMods.length} modifications détectées dans la section source`);
-
-    // === STEP 2: Split source into chapters (before and after) ===
-    addLog('Découpage en chapitres...');
-    const beforeSections = detectSectionsInRawXml(beforeXml);
-    const beforeSourceSection = beforeSections.find((s) => s.lang === sourceLang);
-    if (!beforeSourceSection) {
-      addLog('ERREUR : Section source "avant" introuvable');
-      return;
-    }
-    const sourceBeforeChapters = splitSectionIntoChapters(
-      beforeXml,
-      beforeSourceSection.startPara,
-      beforeSourceSection.endPara,
-    );
-
-    await yieldToMain();
-
-    const newSections = detectSectionsInRawXml(cleanedXml);
-    const cleanedSource = newSections.find((s) => s.lang === sourceLang);
-    if (!cleanedSource) {
-      addLog('ERREUR : Section source nettoyée introuvable');
-      return;
-    }
-
-    const sourceAfterChapters = splitSectionIntoChapters(
       cleanedXml,
-      cleanedSource.startPara,
-      cleanedSource.endPara,
-    );
+      newSections,
+      appliedModsCount,
+      sourceBeforeChapters,
+      sourceAfterChapters,
+      sourceBeforeTableTexts,
+      sourceAfterTableTexts,
+      changedChapterIndices,
+      maxChapters,
+      chapterLogs,
+      mismatchChapterCount,
+    } = workerResult;
 
-    await yieldToMain();
+    addLog(`${appliedModsCount} modifications détectées dans la section source`);
 
+    // Log chapter details from worker
     addLog(`Source AVANT : ${sourceBeforeChapters.length} chapitres`);
     for (const ch of sourceBeforeChapters) {
       addLog(`  [avant] ch "${ch.title}" paras ${ch.startParaIdx}-${ch.endParaIdx} (${ch.paragraphCount}p)`);
@@ -183,50 +169,19 @@ export function PropagationStep({
     }
     addLog(`Sections : ${newSections.map((s) => `${s.lang}(${s.startPara}-${s.endPara})`).join(', ')}`);
 
-    if (sourceBeforeChapters.length !== sourceAfterChapters.length) {
+    if (mismatchChapterCount) {
       addLog(`⚠ ATTENTION : nombre de chapitres différent avant/après (${sourceBeforeChapters.length} vs ${sourceAfterChapters.length})`);
     }
 
-    // === STEP 3: Find which chapters changed ===
-    addLog('Comparaison des chapitres avant/après...');
-    const maxChapters = Math.min(sourceBeforeChapters.length, sourceAfterChapters.length);
-    const sourceBeforeTableTexts: string[] = [];
-    const sourceAfterTableTexts: string[] = [];
-    const changedChapterIndices: number[] = [];
-
-    for (let i = 0; i < maxChapters; i++) {
-      // Yield every 5 chapters to keep UI responsive
-      if (i > 0 && i % 5 === 0) await yieldToMain();
-
-      // Plain text for comparison
-      const beforeText = formatChapterText(beforeXml, sourceBeforeChapters[i]);
-      const afterText = formatChapterText(cleanedXml, sourceAfterChapters[i]);
-
-      // TABLE ROW format for Claude
-      sourceBeforeTableTexts.push(formatChapterTextWithTables(beforeXml, sourceBeforeChapters[i]).text);
-      sourceAfterTableTexts.push(formatChapterTextWithTables(cleanedXml, sourceAfterChapters[i]).text);
-
-      const beforeNorm = beforeText.replace(/\s+/g, ' ').trim();
-      const afterNorm = afterText.replace(/\s+/g, ' ').trim();
-      const beforeLineCount = beforeText.split('\n').filter((l) => l.trim()).length;
-      const afterLineCount = afterText.split('\n').filter((l) => l.trim()).length;
-      const isChanged = beforeNorm !== afterNorm || beforeLineCount !== afterLineCount;
-
-      if (isChanged) {
-        changedChapterIndices.push(i);
-      }
-
-      // Diagnostic: log each chapter comparison result
-      addLog(`  ch.${i + 1} "${sourceAfterChapters[i].title.substring(0, 40)}" : before=${beforeLineCount}p after=${afterLineCount}p modifié=${isChanged}`);
-
-      if (!isChanged) {
-        const snippet = afterText.substring(0, 80).replace(/\n/g, ' | ');
-        addLog(`    aperçu: "${snippet}..."`);
+    // Log chapter comparison results
+    for (const cl of chapterLogs) {
+      addLog(`  ch.${cl.index + 1} "${cl.title}" : before=${cl.beforeLines}p after=${cl.afterLines}p modifié=${cl.isChanged}`);
+      if (!cl.isChanged && cl.snippet) {
+        addLog(`    aperçu: "${cl.snippet}..."`);
       }
     }
 
     addLog(`Chapitres modifiés : ${changedChapterIndices.length}/${maxChapters} — ${changedChapterIndices.map((idx) => `"${sourceAfterChapters[idx].title.substring(0, 30)}"`).join(', ') || '(aucun)'}`);
-
 
     if (changedChapterIndices.length === 0) {
       addLog('Aucune modification de contenu détectée — propagation terminée');
@@ -238,7 +193,16 @@ export function PropagationStep({
       return;
     }
 
-    // === STEP 4: Process target sections in REVERSE document order ===
+    // === STEP 4: Process target sections (light work — API calls + small XML ops) ===
+    // Import only the functions needed for target processing (these are lightweight per-chapter)
+    const { applyModificationsToSection, clearXmlCaches, detectSectionsInRawXml } = await import('@/lib/docx-rebuilder');
+    const {
+      splitSectionIntoChapters,
+      formatChapterTextWithTables,
+      parseChapterResponse,
+      buildChapterModificationsWithTables,
+    } = await import('@/lib/docx-chapter-splitter');
+
     let currentXml = cleanedXml;
     const languageStats: PropagationResult['languageStats'] = [];
     const legacyResults: LanguageResult[] = [];
@@ -249,7 +213,6 @@ export function PropagationStep({
       .filter((x): x is { lang: string; section: RawSection } => x.section != null)
       .sort((a, b) => b.section.startPara - a.section.startPara);
 
-    // Total work units for progress: changedChapters × languages
     const totalWork = changedChapterIndices.length * orderedTargets.length;
     let workDone = 0;
 
@@ -260,17 +223,14 @@ export function PropagationStep({
       await yieldToMain();
 
       try {
-        // Clear caches since currentXml changes between languages
         clearXmlCaches();
 
-        // Re-detect sections in current XML for accurate boundaries
         const currentSections = detectSectionsInRawXml(currentXml);
         const currentTarget = currentSections.find((s) => s.lang === lang);
         if (!currentTarget) {
           throw new Error(`Section ${lang} introuvable dans le XML`);
         }
 
-        // Split target section into chapters
         const targetChapters = splitSectionIntoChapters(
           currentXml,
           currentTarget.startPara,
@@ -278,7 +238,6 @@ export function PropagationStep({
         );
         addLog(`${lang} : ${targetChapters.length} chapitres détectés`);
 
-        // Collect all modifications from all chapters for this language
         const allMods: Array<{ relativeParagraphIndex: number; action: 'delete_paragraph' | 'replace_text' | 'insert_after' | 'delete_table_row' | 'insert_table_row'; newText?: string; cellTexts?: string[] }> = [];
 
         for (const chIdx of changedChapterIndices) {
@@ -289,12 +248,10 @@ export function PropagationStep({
             continue;
           }
 
-          // Format target with TABLE ROW awareness
           const targetResult = formatChapterTextWithTables(currentXml, targetChapters[chIdx]);
 
           addLog(`${lang} : chapitre ${chIdx + 1}/${maxChapters} "${sourceAfterChapters[chIdx].title.substring(0, 40)}"...`);
 
-          // Call chapter-based propagation API
           const res = await fetch('/api/propagate/chapter', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -318,7 +275,6 @@ export function PropagationStep({
             throw new Error(data.error || `Erreur ${res.status}`);
           }
 
-          // Parse Claude's response and build modifications
           const parsed = parseChapterResponse(data.modifiedChapter || '');
           const chapterRelStart = targetChapters[chIdx].startParaIdx - currentTarget.startPara;
 
@@ -334,7 +290,6 @@ export function PropagationStep({
           setProgress(Math.round((workDone / totalWork) * 95));
         }
 
-        // Apply all modifications for this language in one batch
         if (allMods.length > 0) {
           currentXml = applyModificationsToSection(currentXml, currentTarget.startPara, allMods);
           addLog(`${lang} : ${allMods.length} modification(s) appliquée(s) au total`);
@@ -342,7 +297,6 @@ export function PropagationStep({
           addLog(`${lang} : aucune modification à appliquer`);
         }
 
-        // Compute stats
         const updatedSections = detectSectionsInRawXml(currentXml);
         const updatedTarget = updatedSections.find((s) => s.lang === lang);
         languageStats.push({
@@ -351,7 +305,6 @@ export function PropagationStep({
           totalParagraphs: updatedTarget ? updatedTarget.endPara - updatedTarget.startPara + 1 : 0,
         });
 
-        // Legacy results for export
         legacyResults.push({
           language: lang,
           modifications: (modifications || []).map((mod) => ({
@@ -372,13 +325,11 @@ export function PropagationStep({
         addLog(`ERREUR ${lang} : ${message}`);
         failedLangs.push(lang);
         setWarnings((prev) => [...prev, `${lang} : ${message}`]);
-        // Skip remaining work units for this language
         workDone += changedChapterIndices.length;
         setProgress(Math.round((workDone / totalWork) * 95));
       }
     }
 
-    // Handle selected langs that have no section
     for (const lang of selectedLangs) {
       if (!orderedTargets.find((t) => t.lang === lang)) {
         setLangStatus((prev) => ({ ...prev, [lang]: 'error' }));
@@ -387,7 +338,6 @@ export function PropagationStep({
       }
     }
 
-    // Final summary
     if (failedLangs.length > 0 && failedLangs.length < selectedLangs.length) {
       addLog(`Propagation terminée avec ${failedLangs.length} erreur(s)`);
     } else if (failedLangs.length === 0) {
