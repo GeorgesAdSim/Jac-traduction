@@ -269,6 +269,25 @@ export function cleanSourceSection(
 
     if (!hasChanges) continue;
 
+    // Check if ALL runs with text in this paragraph are DELETE
+    // If so, remove the entire paragraph
+    const allRunsAreDelete = runPositions.length > 0 && runPositions.every((runPos) => {
+      const runXml = paraXml.substring(runPos.start, runPos.end);
+      const highlight = getRunHighlight(runXml) || paraHighlight;
+      if (!highlight) {
+        // Non-highlighted run: only counts if it has meaningful text
+        const text = extractParaText(runXml).trim();
+        return text === '';
+      }
+      return highlightToType(highlight) === 'DELETE';
+    });
+
+    if (allRunsAreDelete) {
+      // Remove entire paragraph
+      replacements.push({ start: paraStart, end: paraEnd, newXml: '' });
+      continue;
+    }
+
     // Build the new paragraph XML by applying run replacements backwards
     let newParaXml = paraXml;
     for (let r = parts.length - 1; r >= 0; r--) {

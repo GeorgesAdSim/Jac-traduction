@@ -129,7 +129,7 @@ export function PropagationStep({
     const languageStats: PropagationResult['languageStats'] = [];
     const legacyResults: LanguageResult[] = [];
     const failedLangs: string[] = [];
-    const CONTEXT_RADIUS = 3;
+    const CONTEXT_RADIUS = 5;
 
     for (let i = 0; i < selectedLangs.length; i++) {
       const lang = selectedLangs[i];
@@ -177,8 +177,10 @@ export function PropagationStep({
         // Client-side batching: send max 8 patches per API call
         const BATCH_SIZE = 8;
         const totalBatches = Math.ceil(patches.length / BATCH_SIZE);
-        const allPatchResults: Array<{ index: number; find: string; replace: string }> = [];
+        const allPatchResults: Array<{ index: number; action: string; find: string; replace: string }> = [];
         let totalRequested = 0;
+
+        addLog(`${lang} : ${patches.length} patches à envoyer en ${totalBatches} batch(es)`);
 
         for (let b = 0; b < totalBatches; b++) {
           const batch = patches.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
@@ -196,7 +198,7 @@ export function PropagationStep({
           });
 
           const text = await res.text();
-          let data: { language: string; patches: Array<{ index: number; find: string; replace: string }>; stats: { patchesRequested: number; patchesApplied: number } };
+          let data: { language: string; patches: Array<{ index: number; action: string; find: string; replace: string }>; stats: { patchesRequested: number; patchesApplied: number } };
           try {
             data = JSON.parse(text);
           } catch {
@@ -216,10 +218,32 @@ export function PropagationStep({
           setProgress(Math.round(langProgress * 100));
         }
 
-        // Apply FIND/REPLACE patches directly on the full XML — no paragraph splitting
+        addLog(`${lang} : ${allPatchResults.length} patches reçus, application en cours...`);
+
+        // Apply patches based on action type
         let appliedCount = 0;
         for (const patch of allPatchResults) {
-          if (patch.find && currentXml.includes(patch.find)) {
+          if (!patch.find || !currentXml.includes(patch.find)) continue;
+
+          if (patch.action === 'delete') {
+            // Remove the text from the XML
+            currentXml = currentXml.replace(patch.find, '');
+            appliedCount++;
+          } else if (patch.action === 'insert_after') {
+            // Find the <w:p> containing the anchor text and insert a new paragraph after it
+            const anchorIdx = currentXml.indexOf(patch.find);
+            if (anchorIdx !== -1) {
+              // Find the end of the <w:p> that contains this anchor
+              const closePIdx = currentXml.indexOf('</w:p>', anchorIdx);
+              if (closePIdx !== -1) {
+                const insertPos = closePIdx + '</w:p>'.length;
+                const newPara = `<w:p><w:r><w:t>${patch.replace}</w:t></w:r></w:p>`;
+                currentXml = currentXml.substring(0, insertPos) + newPara + currentXml.substring(insertPos);
+                appliedCount++;
+              }
+            }
+          } else {
+            // modify: simple find/replace
             currentXml = currentXml.replace(patch.find, patch.replace);
             appliedCount++;
           }

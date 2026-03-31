@@ -22,6 +22,7 @@ interface PropagateApplyRequest {
 
 interface PatchResult {
   index: number;
+  action: 'delete' | 'modify' | 'insert_after';
   find: string;
   replace: string;
 }
@@ -105,14 +106,18 @@ MANDATORY RULES:
 4. Preserve units: mm, kg, °C, rpm, bar
 5. RESPECT the glossary terms exactly when provided
 
-RESPONSE FORMAT — for each modification, output exactly one line:
-PATCH N: FIND: <exact text to find in ${targetName}> | REPLACE: <new text in ${targetName}>
+RESPONSE FORMAT — for each modification, output exactly one line using the format that matches the modification type:
 
-For DELETE modifications: the REPLACE value must be empty (nothing after REPLACE:)
-For MODIFY modifications: FIND is the old ${targetName} text, REPLACE is the new translated text
-For ADD modifications: FIND must be the ${targetName} text of the closest paragraph AFTER which to insert, and REPLACE must be that same text followed by the new translated text
+For DELETE: find the equivalent text in ${targetName} and output:
+PATCH N: DELETE: <exact text to find and remove in ${targetName}>
 
-If you cannot find a matching passage in the ${targetName} context, output:
+For MODIFY: find the old text in ${targetName} and output the replacement:
+PATCH N: FIND: <old text in ${targetName}> | REPLACE: <new translated text>
+
+For ADD: find the nearest paragraph in ${targetName} BEFORE the insertion point and output:
+PATCH N: INSERT_AFTER: <anchor text from ${targetName} paragraph> | NEW: <translated text to add>
+
+If you cannot find a matching passage, output:
 PATCH N: SKIP
 
 Output ONLY PATCH lines, nothing else.`;
@@ -138,23 +143,46 @@ ${glossarySection}`;
   const lines = content.text.split('\n');
 
   for (const line of lines) {
-    const patchMatch = line.match(/^PATCH\s+(\d+):\s*(?:FIND:\s*(.*?)\s*\|\s*REPLACE:\s*(.*)|SKIP)\s*$/i);
-    if (!patchMatch) continue;
+    // Match PATCH N: ...
+    const patchNumMatch = line.match(/^PATCH\s+(\d+):\s*(.*)/i);
+    if (!patchNumMatch) continue;
 
-    const patchIndex = parseInt(patchMatch[1], 10) - 1;
+    const patchIndex = parseInt(patchNumMatch[1], 10) - 1;
     if (patchIndex < 0 || patchIndex >= patches.length) continue;
 
-    if (line.toUpperCase().includes('SKIP')) continue;
+    const rest = patchNumMatch[2].trim();
+    if (rest.toUpperCase() === 'SKIP') continue;
 
-    const find = (patchMatch[2] || '').trim();
-    const replace = (patchMatch[3] || '').trim();
+    // DELETE: <text>
+    const deleteMatch = rest.match(/^DELETE:\s*(.+)/i);
+    if (deleteMatch) {
+      const find = deleteMatch[1].trim();
+      if (find) {
+        results.push({ index: patches[patchIndex].paragraphIndex, action: 'delete', find, replace: '' });
+      }
+      continue;
+    }
 
-    if (find) {
-      results.push({
-        index: patches[patchIndex].paragraphIndex,
-        find,
-        replace,
-      });
+    // INSERT_AFTER: <anchor> | NEW: <text>
+    const insertMatch = rest.match(/^INSERT_AFTER:\s*(.*?)\s*\|\s*NEW:\s*(.*)/i);
+    if (insertMatch) {
+      const find = (insertMatch[1] || '').trim();
+      const replace = (insertMatch[2] || '').trim();
+      if (find && replace) {
+        results.push({ index: patches[patchIndex].paragraphIndex, action: 'insert_after', find, replace });
+      }
+      continue;
+    }
+
+    // FIND: <old> | REPLACE: <new>
+    const modifyMatch = rest.match(/^FIND:\s*(.*?)\s*\|\s*REPLACE:\s*(.*)/i);
+    if (modifyMatch) {
+      const find = (modifyMatch[1] || '').trim();
+      const replace = (modifyMatch[2] || '').trim();
+      if (find) {
+        results.push({ index: patches[patchIndex].paragraphIndex, action: 'modify', find, replace });
+      }
+      continue;
     }
   }
 
