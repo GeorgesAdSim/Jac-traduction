@@ -5,39 +5,10 @@ import { getTerms } from '@/lib/glossary-service';
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
-interface ModificationPatch {
-  type: 'DELETE' | 'MODIFY' | 'ADD';
-  text: string;
-  sourceContext: string[];
-  targetContext: string[];
-  paragraphIndex: number;
-}
-
-interface PropagateApplyRequest {
-  patches: ModificationPatch[];
-  sourceLang: string;
+interface TranslateBatchRequest {
+  texts: string[];
   targetLang: string;
   useGlossary: boolean;
-}
-
-interface PatchResult {
-  index: number;
-  action: 'delete' | 'modify' | 'insert_after';
-  find: string;
-  replace: string;
-}
-
-let anthropicClient: Anthropic | null = null;
-
-function getClient(): Anthropic {
-  if (!anthropicClient) {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      throw new Error("Variable d'environnement ANTHROPIC_API_KEY non configurée");
-    }
-    anthropicClient = new Anthropic({ apiKey });
-  }
-  return anthropicClient;
 }
 
 const LANG_NAMES: Record<string, string> = {
@@ -52,6 +23,19 @@ const LANG_NAMES: Record<string, string> = {
   PL: 'Polish',
   PT: 'Portuguese',
 };
+
+let anthropicClient: Anthropic | null = null;
+
+function getClient(): Anthropic {
+  if (!anthropicClient) {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      throw new Error("Variable d'environnement ANTHROPIC_API_KEY non configurée");
+    }
+    anthropicClient = new Anthropic({ apiKey });
+  }
+  return anthropicClient;
+}
 
 async function callWithRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -70,156 +54,31 @@ async function callWithRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T
   throw new Error('Max retries reached');
 }
 
-/**
- * Process a batch of patches (max 10) with Claude.
- * Returns FIND/REPLACE pairs to apply in the target section.
- */
-async function processPatchBatch(
-  patches: ModificationPatch[],
-  sourceLang: string,
-  targetLang: string,
-  glossarySection: string
-): Promise<PatchResult[]> {
-  const targetName = LANG_NAMES[targetLang] || targetLang;
-  const sourceName = LANG_NAMES[sourceLang] || sourceLang;
-
-  const patchDescriptions = patches.map((patch, i) => {
-    const typeLabel = patch.type;
-    const sourceCtx = patch.sourceContext.filter(Boolean).join('\n    ');
-    const targetCtx = patch.targetContext.filter(Boolean).join('\n    ');
-
-    return `--- MODIFICATION ${i + 1} [${typeLabel}] ---
-  Text in source (${sourceName}): "${patch.text}"
-  Source (${sourceName}) context — for reference only, DO NOT copy this text:
-    ${sourceCtx}
-  Target (${targetName}) context — find/replace in THIS text:
-    ${targetCtx}`;
-  }).join('\n\n');
-
-  const systemPrompt = `You are an expert technical documentation translator for JAC industrial bakery machines.
-You propagate modifications from ${sourceName} to ${targetName}.
-
-CRITICAL: You are translating to ${targetName} ONLY. Every text you produce MUST be in ${targetName}. NEVER output text in any other language.
-
-MANDATORY RULES:
-1. NEVER translate machine names: DURO, VARIA, VMP, VMA, VMS, PICO, FORM-IT, SOLEO, TOPAZE, SIMPLY, NEMO, PICOMATIC
-2. NEVER translate error codes: E01, E02, E03, etc.
-3. Preserve figure references: fig.2, n°12, §3.1
-4. Preserve units: mm, kg, °C, rpm, bar
-5. RESPECT the glossary terms exactly when provided
-6. ALL replacement text and NEW text MUST be in ${targetName} — not ${sourceName} or any other language
-
-RESPONSE FORMAT — for each modification, output exactly one line using the format that matches the modification type:
-
-For DELETE: find the equivalent text in ${targetName} and output:
-PATCH N: DELETE: <exact text to find and remove in ${targetName}>
-
-For MODIFY: find the old text in ${targetName} and output the replacement:
-PATCH N: FIND: <old text in ${targetName}> | REPLACE: <new translated text>
-
-For ADD: find the nearest paragraph in ${targetName} BEFORE the insertion point and output:
-PATCH N: INSERT_AFTER: <anchor text from ${targetName} paragraph> | NEW: <translated text to add>
-
-If you cannot find a matching passage, output:
-PATCH N: SKIP
-
-Output ONLY PATCH lines, nothing else.`;
-
-  const userMessage = `${patchDescriptions}
-${glossarySection}`;
-
-  const response = await callWithRetry(() =>
-    getClient().messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 4096,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userMessage }],
-    })
-  );
-
-  const content = response.content[0];
-  if (content.type !== 'text') {
-    throw new Error('Unexpected response from Claude');
-  }
-
-  const results: PatchResult[] = [];
-  const lines = content.text.split('\n');
-
-  for (const line of lines) {
-    // Match PATCH N: ...
-    const patchNumMatch = line.match(/^PATCH\s+(\d+):\s*(.*)/i);
-    if (!patchNumMatch) continue;
-
-    const patchIndex = parseInt(patchNumMatch[1], 10) - 1;
-    if (patchIndex < 0 || patchIndex >= patches.length) continue;
-
-    const rest = patchNumMatch[2].trim();
-    if (rest.toUpperCase() === 'SKIP') continue;
-
-    // DELETE: <text>
-    const deleteMatch = rest.match(/^DELETE:\s*(.+)/i);
-    if (deleteMatch) {
-      const find = deleteMatch[1].trim();
-      if (find) {
-        results.push({ index: patches[patchIndex].paragraphIndex, action: 'delete', find, replace: '' });
-      }
-      continue;
-    }
-
-    // INSERT_AFTER: <anchor> | NEW: <text>
-    const insertMatch = rest.match(/^INSERT_AFTER:\s*(.*?)\s*\|\s*NEW:\s*(.*)/i);
-    if (insertMatch) {
-      const find = (insertMatch[1] || '').trim();
-      const replace = (insertMatch[2] || '').trim();
-      if (find && replace) {
-        results.push({ index: patches[patchIndex].paragraphIndex, action: 'insert_after', find, replace });
-      }
-      continue;
-    }
-
-    // FIND: <old> | REPLACE: <new>
-    const modifyMatch = rest.match(/^FIND:\s*(.*?)\s*\|\s*REPLACE:\s*(.*)/i);
-    if (modifyMatch) {
-      const find = (modifyMatch[1] || '').trim();
-      const replace = (modifyMatch[2] || '').trim();
-      if (find) {
-        results.push({ index: patches[patchIndex].paragraphIndex, action: 'modify', find, replace });
-      }
-      continue;
-    }
-  }
-
-  return results;
-}
-
-const MAX_PATCHES_PER_CALL = 10;
-
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as PropagateApplyRequest;
-    const { patches, sourceLang, targetLang, useGlossary } = body;
+    const body = (await request.json()) as TranslateBatchRequest;
+    const { texts, targetLang, useGlossary } = body;
 
-    if (!patches || !sourceLang || !targetLang) {
+    if (!texts || !targetLang) {
       return NextResponse.json(
-        { error: 'Missing required fields: patches, sourceLang, targetLang' },
+        { error: 'Missing required fields: texts, targetLang' },
         { status: 400 }
       );
     }
 
-    if (patches.length > MAX_PATCHES_PER_CALL) {
-      return NextResponse.json(
-        { error: `Max ${MAX_PATCHES_PER_CALL} patches per call. Received ${patches.length}. Batch on the client side.` },
-        { status: 400 }
-      );
+    if (texts.length === 0) {
+      return NextResponse.json({ translations: [] });
     }
 
-    // Get glossary terms if enabled
+    const targetName = LANG_NAMES[targetLang] || targetLang;
+
+    // Build glossary section if enabled
     let glossarySection = '';
     if (useGlossary) {
       try {
-        const terms = await getTerms(sourceLang, targetLang);
+        const terms = await getTerms('EN', targetLang);
         if (terms.length > 0) {
-          glossarySection = '\nTECHNICAL GLOSSARY - You MUST use these exact translations:\n' +
+          glossarySection = '\n\nTECHNICAL GLOSSARY — use these exact translations:\n' +
             terms.map((t) => `- "${t.source_term}" → "${t.translated_term}"`).join('\n');
         }
       } catch {
@@ -227,17 +86,70 @@ export async function POST(request: Request) {
       }
     }
 
-    // Single Claude call with the received patches (max 10)
-    const results = await processPatchBatch(patches, sourceLang, targetLang, glossarySection);
+    // Build numbered text list
+    const numberedTexts = texts.map((t, i) => `${i + 1}. ${t}`).join('\n');
 
-    return NextResponse.json({
-      language: targetLang,
-      patches: results,
-      stats: {
-        patchesRequested: patches.length,
-        patchesApplied: results.length,
-      },
-    });
+    const systemPrompt = `You are a technical translator for JAC industrial bakery machine documentation.
+Translate each numbered text to ${targetName}. Return ONLY the translations, one per line, numbered identically.
+
+MANDATORY RULES:
+1. NEVER translate machine names: DURO, VARIA, VMP, VMA, VMS, PICO, FORM-IT, SOLEO, TOPAZE, SIMPLY, NEMO, PICOMATIC
+2. NEVER translate error codes: E01, E02, E03, etc.
+3. Preserve figure references: fig.2, n°12, §3.1
+4. Preserve units: mm, kg, °C, rpm, bar
+5. ALL output MUST be in ${targetName}
+6. RESPECT the glossary terms exactly when provided${glossarySection}`;
+
+    const response = await callWithRetry(() =>
+      getClient().messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: numberedTexts }],
+      })
+    );
+
+    const content = response.content[0];
+    if (content.type !== 'text') {
+      throw new Error('Unexpected response from Claude');
+    }
+
+    // Parse numbered translations
+    const lines = content.text.split('\n').filter((l) => l.trim());
+    const translations: string[] = [];
+
+    for (let i = 0; i < texts.length; i++) {
+      // Try to find line starting with "N." or "N)"
+      const prefix = `${i + 1}.`;
+      const prefixAlt = `${i + 1})`;
+      let found = false;
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith(prefix)) {
+          translations.push(trimmed.substring(prefix.length).trim());
+          found = true;
+          break;
+        }
+        if (trimmed.startsWith(prefixAlt)) {
+          translations.push(trimmed.substring(prefixAlt.length).trim());
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        // Fallback: use line by index if available
+        if (i < lines.length) {
+          const line = lines[i].trim();
+          // Strip any leading number prefix
+          const stripped = line.replace(/^\d+[\.\)]\s*/, '');
+          translations.push(stripped || texts[i]);
+        } else {
+          translations.push(texts[i]); // keep original if translation missing
+        }
+      }
+    }
+
+    return NextResponse.json({ translations });
   } catch (err) {
     console.error('[propagate/apply] Error:', err);
     const message = err instanceof Error ? err.message : 'Internal error';

@@ -101,7 +101,17 @@ export async function analyzeDocxClient(buffer: ArrayBuffer, filename: string): 
   const modifications: Modification[] = [];
   let modCounter = 0;
 
+  // Detect sections early so we can filter highlights outside the source section
+  const sectionResult = detectLanguageSections(parsed);
+  const sourceSection = sectionResult.sections.find((s) => s.isSource);
+  const sourceStart = sourceSection?.startPara ?? 0;
+  const sourceEnd = sourceSection?.endPara ?? paragraphs.length - 1;
+
   for (let pIdx = 0; pIdx < paragraphs.length; pIdx++) {
+    // Skip highlights outside the source section (cover pages, target sections)
+    if (sectionResult.sections.length > 1 && (pIdx < sourceStart || pIdx > sourceEnd)) {
+      continue;
+    }
     const para = paragraphs[pIdx];
     const runs = ensureArray(para["w:r"] as Record<string, unknown> | Record<string, unknown>[]);
 
@@ -155,9 +165,6 @@ export async function analyzeDocxClient(buffer: ArrayBuffer, filename: string): 
   }
 
   const languages = extractLanguages(parsed);
-
-  // Detect language sections
-  const sectionResult = detectLanguageSections(parsed);
 
   return {
     filename,

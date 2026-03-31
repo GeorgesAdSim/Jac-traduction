@@ -16,6 +16,8 @@ export interface AppliedModification {
   paragraphIndex: number;
   contextBefore: string;
   contextAfter: string;
+  /** True when an entire paragraph was deleted (all runs were red) */
+  paragraphDeleted: boolean;
 }
 
 function highlightToType(val: string): ModificationType {
@@ -240,6 +242,7 @@ export function cleanSourceSection(
         paragraphIndex: pIdx - sourceStartPara,
         contextBefore,
         contextAfter,
+        paragraphDeleted: modType === 'DELETE',
       });
 
       if (modType === 'DELETE') {
@@ -281,6 +284,7 @@ export function cleanSourceSection(
           paragraphIndex: pIdx - sourceStartPara,
           contextBefore,
           contextAfter,
+          paragraphDeleted: false, // will be updated below if all runs are DELETE
         });
       } else {
         // ADD or MODIFY: keep text, remove highlight
@@ -292,6 +296,7 @@ export function cleanSourceSection(
           paragraphIndex: pIdx - sourceStartPara,
           contextBefore,
           contextAfter,
+          paragraphDeleted: false,
         });
       }
     }
@@ -312,7 +317,12 @@ export function cleanSourceSection(
     });
 
     if (allRunsAreDelete) {
-      // Remove entire paragraph
+      // Remove entire paragraph — mark all DELETE mods for this paragraph as paragraphDeleted
+      for (const mod of modifications) {
+        if (mod.paragraphIndex === pIdx - sourceStartPara && mod.type === 'DELETE') {
+          mod.paragraphDeleted = true;
+        }
+      }
       replacements.push({ start: paraStart, end: paraEnd, newXml: '' });
       continue;
     }
