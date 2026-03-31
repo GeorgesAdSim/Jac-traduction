@@ -265,3 +265,117 @@ function escapeXml(text: string): string {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
 }
+
+/**
+ * Language markers for section detection in raw XML.
+ */
+const LANG_MARKERS: Record<string, string> = {
+  english: 'EN', français: 'FR', deutsch: 'DE', nederlands: 'NL',
+  русский: 'RU', español: 'ES', italiano: 'IT', العربية: 'AR',
+  polski: 'PL', português: 'PT', česky: 'CS', magyar: 'HU',
+  română: 'RO', türkçe: 'TR',
+};
+
+export interface RawSection {
+  lang: string;
+  startPara: number;
+  endPara: number;
+}
+
+/**
+ * Detect language sections by scanning paragraph texts in raw XML.
+ * No parser needed — uses indexOf-based paragraph/text extraction.
+ */
+export function detectSectionsInRawXml(xml: string): RawSection[] {
+  const positions = findParagraphPositions(xml);
+  const markers: Array<{ index: number; lang: string }> = [];
+
+  for (let i = 0; i < positions.length; i++) {
+    const paraXml = xml.substring(positions[i].start, positions[i].end);
+    const text = extractParaText(paraXml).trim();
+    if (!text) continue;
+
+    // Remove brackets: "[English]" → "English"
+    const cleaned = text.replace(/^\[\s*/, '').replace(/\s*\]$/, '').trim().toLowerCase();
+    const lang = LANG_MARKERS[cleaned];
+    if (lang && !markers.some((m) => m.lang === lang)) {
+      markers.push({ index: i, lang });
+    }
+  }
+
+  if (markers.length === 0) return [];
+  markers.sort((a, b) => a.index - b.index);
+
+  const sections: RawSection[] = [];
+  for (let i = 0; i < markers.length; i++) {
+    const start = markers[i].index;
+    const end = i + 1 < markers.length ? markers[i + 1].index - 1 : positions.length - 1;
+    sections.push({ lang: markers[i].lang, startPara: start, endPara: end });
+  }
+  return sections;
+}
+
+export interface SectionModification {
+  relativeParagraphIndex: number;
+  action: 'delete_paragraph' | 'replace_text' | 'insert_after';
+  newText?: string;
+}
+
+/**
+ * Apply a batch of modifications to a document section.
+ * Sorts modifications by relative index DESCENDING and applies each one,
+ * recalculating paragraph positions before each operation.
+ */
+export function applyModificationsToSection(
+  xml: string,
+  sectionStartPara: number,
+  modifications: SectionModification[]
+): string {
+  // Sort by relative index DESCENDING (last paragraph first).
+  // For same index: insert_after before delete_paragraph (insert must happen
+  // while the target paragraph still exists at that position).
+  const actionOrder: Record<string, number> = { insert_after: 0, replace_text: 1, delete_paragraph: 2 };
+  const sorted = [...modifications].sort((a, b) => {
+    if (a.relativeParagraphIndex !== b.relativeParagraphIndex) {
+      return b.relativeParagraphIndex - a.relativeParagraphIndex;
+    }
+    return (actionOrder[a.action] ?? 1) - (actionOrder[b.action] ?? 1);
+  });
+
+  let currentXml = xml;
+
+  for (const mod of sorted) {
+    const positions = findParagraphPositions(currentXml);
+    const absIdx = sectionStartPara + mod.relativeParagraphIndex;
+
+    if (absIdx < 0 || absIdx >= positions.length) continue;
+
+    const { start, end } = positions[absIdx];
+
+    switch (mod.action) {
+      case 'delete_paragraph':
+        currentXml = currentXml.substring(0, start) + currentXml.substring(end);
+        break;
+
+      case 'replace_text': {
+        if (!mod.newText) break;
+        const paraXml = currentXml.substring(start, end);
+        const fullText = extractParaText(paraXml);
+        if (fullText) {
+          const newParaXml = replaceInWt(paraXml, fullText, mod.newText);
+          currentXml = currentXml.substring(0, start) + newParaXml + currentXml.substring(end);
+        }
+        break;
+      }
+
+      case 'insert_after': {
+        if (!mod.newText) break;
+        const newPara = `<w:p><w:r><w:t xml:space="preserve">${escapeXml(mod.newText)}</w:t></w:r></w:p>`;
+        currentXml = currentXml.substring(0, end) + newPara + currentXml.substring(end);
+        break;
+      }
+    }
+  }
+
+  return currentXml;
+}

@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils';
 import type { Modification } from '@/lib/types/docx';
 import type { LanguageSection } from '@/lib/docx-section-detector';
 import type { AppliedModification } from '@/lib/docx-source-cleaner';
+import type { SectionModification, RawSection } from '@/lib/docx-rebuilder';
 
 const AVAILABLE_LANGUAGES = [
   { code: 'FR', name: 'Français' },
@@ -117,7 +118,7 @@ export function PropagationStep({
     // === STEP 1: Clean source section ===
     addLog('Nettoyage de la section source...');
     const { cleanSourceSection } = await import('@/lib/docx-source-cleaner');
-    const { modifyParagraphAtIndex, getParagraphTexts } = await import('@/lib/docx-rebuilder');
+    const { getParagraphTexts, detectSectionsInRawXml, applyModificationsToSection } = await import('@/lib/docx-rebuilder');
 
     const sourceSection = sections.find((s) => s.isSource);
     if (!sourceSection) {
@@ -193,28 +194,39 @@ export function PropagationStep({
     addLog(`${textsToTranslate.length} paragraphes à traduire, ${deletedCount} paragraphes à supprimer`);
     addLog(`${fullParaAddIndices.length} paragraphes ADD détectés (alignement requis)`);
 
-    // === STEP 3: Process each target language ===
+    // === STEP 3: Re-detect sections in cleaned XML ===
+    // After cleaning source (deleting paragraphs, removing highlights), paragraph indices
+    // have shifted. We MUST re-detect section boundaries in the cleaned XML.
+    const newSections = detectSectionsInRawXml(cleanedXml);
+    addLog(`Sections re-détectées : ${newSections.map((s) => `${s.lang}(${s.startPara}-${s.endPara})`).join(', ')}`);
+
+    // === STEP 4: Process target sections in REVERSE document order ===
+    // Processing from last section to first ensures that modifications to later sections
+    // never shift the paragraph indices of earlier sections.
     let currentXml = cleanedXml;
     const languageStats: PropagationResult['languageStats'] = [];
     const legacyResults: LanguageResult[] = [];
     const failedLangs: string[] = [];
 
-    // Process target sections in DOCUMENT ORDER so cumulative offset is correct
     const orderedTargets = selectedLangs
-      .map((l) => ({ lang: l, section: sections.find((s) => s.lang === l) }))
-      .filter((x): x is { lang: string; section: LanguageSection } => x.section != null)
-      .sort((a, b) => a.section.startPara - b.section.startPara);
-
-    // Track cumulative paragraph offset (source deletions shift all subsequent sections)
-    let cumulativeParaOffset = -deletedCount;
+      .map((l) => ({ lang: l, section: newSections.find((s) => s.lang === l) }))
+      .filter((x): x is { lang: string; section: RawSection } => x.section != null)
+      .sort((a, b) => b.section.startPara - a.section.startPara); // REVERSE document order
 
     for (let i = 0; i < orderedTargets.length; i++) {
-      const { lang, section: targetSection } = orderedTargets[i];
+      const { lang } = orderedTargets[i];
       setLangStatus((prev) => ({ ...prev, [lang]: 'active' }));
       addLog(`Propagation ${lang} en cours...`);
 
       try {
-        // 3a. Translate all paragraph texts for this language
+        // Re-detect sections in current XML to get accurate boundaries
+        const currentSections = detectSectionsInRawXml(currentXml);
+        const currentTarget = currentSections.find((s) => s.lang === lang);
+        if (!currentTarget) {
+          throw new Error(`Section ${lang} introuvable dans le XML`);
+        }
+
+        // 4a. Translate all paragraph texts for this language
         let translations: string[] = [];
         if (textsToTranslate.length > 0) {
           addLog(`${lang} : traduction de ${textsToTranslate.length} paragraphes...`);
@@ -243,25 +255,17 @@ export function PropagationStep({
           addLog(`${lang} : ${translations.length} traductions reçues`);
         }
 
-        // Build translation map: relIdx → translated text
+        // Build translation map: source relIdx → translated text
         const translationMap: Record<number, string> = {};
         for (let t = 0; t < textsToTranslate.length; t++) {
           translationMap[textsToTranslate[t].relIdx] = translations[t] || '';
         }
 
-        // 3b. Compute adjusted target section boundaries
-        const adjustedStart = targetSection.startPara + cumulativeParaOffset;
-        const adjustedEnd = targetSection.endPara + cumulativeParaOffset;
+        // 4b. Get target section texts for alignment
+        const targetTexts = getParagraphTexts(currentXml, currentTarget.startPara, currentTarget.endPara);
+        addLog(`${lang} : section paras ${currentTarget.startPara}-${currentTarget.endPara} (${targetTexts.length} paras)`);
 
-        // Get target section texts for alignment
-        const targetTexts = getParagraphTexts(currentXml, adjustedStart, adjustedEnd);
-
-        addLog(`${lang} : section paras ${adjustedStart}-${adjustedEnd} (${targetTexts.length} paras)`);
-
-        // 3c. Compute alignment: which full-paragraph ADDs are true inserts vs replacements
-        // Walk ADDs in order. For each: if removing it from the source aligns the NEXT source
-        // paragraph with the current target position → true insert (offset++).
-        // Otherwise → replacement (no offset change).
+        // 4c. Alignment: determine which full-paragraph ADDs are true inserts vs replacements
         let alignOffset = 0;
         const isInsert: Record<number, boolean> = {};
 
@@ -281,9 +285,7 @@ export function PropagationStep({
 
         const insertAddCount = Object.keys(isInsert).filter((k) => isInsert[Number(k)]).length;
         const replaceAddCount = fullParaAddIndices.length - insertAddCount;
-        addLog(
-          `${lang} : alignement — ${insertAddCount} insertion(s), ${replaceAddCount} remplacement(s)`
-        );
+        addLog(`${lang} : alignement — ${insertAddCount} insertion(s), ${replaceAddCount} remplacement(s)`);
 
         // Helper: count true-insert ADDs before a given relative index
         const insertsBefore = (relIdx: number): number => {
@@ -295,24 +297,22 @@ export function PropagationStep({
           return count;
         };
 
-        // 3d. Apply modifications in REVERSE order (preserves indices)
-        const sortedModIndices = Object.keys(paraModTypes)
-          .map(Number)
-          .sort((a, b) => b - a);
-
-        let appliedCount = 0;
+        // 4d. Build modification list for this section
+        const sectionMods: SectionModification[] = [];
         let insertsDone = 0;
         let deletesDone = 0;
 
-        for (const relIdx of sortedModIndices) {
-          const adjRelIdx = relIdx - insertsBefore(relIdx);
-          const absIdx = adjustedStart + adjRelIdx;
+        for (const key of Object.keys(paraModTypes)) {
+          const relIdx = Number(key);
+          const targetRelIdx = relIdx - insertsBefore(relIdx);
 
           // Full paragraph DELETE
           if (deletedParas[relIdx]) {
-            currentXml = modifyParagraphAtIndex(currentXml, absIdx, 'delete_paragraph');
+            sectionMods.push({
+              relativeParagraphIndex: targetRelIdx,
+              action: 'delete_paragraph',
+            });
             deletesDone++;
-            appliedCount++;
             continue;
           }
 
@@ -322,44 +322,47 @@ export function PropagationStep({
 
           // Full-paragraph ADD — true insert
           if (types.length === 1 && types[0] === 'ADD' && isInsert[relIdx]) {
-            const insertAfterIdx = absIdx - 1;
-            if (insertAfterIdx >= adjustedStart) {
-              currentXml = modifyParagraphAtIndex(currentXml, insertAfterIdx, 'insert_after', {
+            const insertAfterRelIdx = targetRelIdx - 1;
+            if (insertAfterRelIdx >= 0) {
+              sectionMods.push({
+                relativeParagraphIndex: insertAfterRelIdx,
+                action: 'insert_after',
                 newText: translation,
               });
               insertsDone++;
-              appliedCount++;
             }
             continue;
           }
 
           // All other cases: MODIFY, partial DELETE, replacement ADD, mixed
-          // → replace the entire target paragraph content with the translated cleaned source paragraph
-          const tgtTexts = getParagraphTexts(currentXml, absIdx, absIdx);
-          const tgtText = tgtTexts[0] || '';
-          if (tgtText.trim()) {
-            currentXml = modifyParagraphAtIndex(currentXml, absIdx, 'replace_text', {
-              oldText: tgtText,
-              newText: translation,
-            });
-            appliedCount++;
-          }
+          sectionMods.push({
+            relativeParagraphIndex: targetRelIdx,
+            action: 'replace_text',
+            newText: translation,
+          });
         }
 
-        // Update cumulative offset for next section
-        cumulativeParaOffset += insertsDone - deletesDone;
-
-        // Compute new target paragraph count
-        const newTargetTexts = getParagraphTexts(
+        // 4e. Apply all modifications to this section in one batch (reverse order internally)
+        currentXml = applyModificationsToSection(
           currentXml,
-          adjustedStart,
-          adjustedEnd + insertsDone - deletesDone
+          currentTarget.startPara,
+          sectionMods
         );
+
+        const appliedCount = sectionMods.length;
+        addLog(`${lang} : ${appliedCount} modification(s) appliquée(s) (${insertsDone} insert, ${deletesDone} delete)`);
+
+        // Compute stats from updated sections
+        const updatedSections = detectSectionsInRawXml(currentXml);
+        const updatedTarget = updatedSections.find((s) => s.lang === lang);
+        const newParaCount = updatedTarget
+          ? updatedTarget.endPara - updatedTarget.startPara + 1
+          : 0;
 
         languageStats.push({
           language: lang,
           modifiedParagraphs: appliedCount,
-          totalParagraphs: newTargetTexts.length,
+          totalParagraphs: newParaCount,
         });
 
         // Build legacy result for CSV/JSON export
@@ -387,9 +390,6 @@ export function PropagationStep({
         });
 
         setLangStatus((prev) => ({ ...prev, [lang]: 'done' }));
-        addLog(
-          `${lang} : ${appliedCount} modification(s) appliquée(s) (${insertsDone} insert, ${deletesDone} delete)`
-        );
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Erreur inconnue';
         setLangStatus((prev) => ({ ...prev, [lang]: 'error' }));
