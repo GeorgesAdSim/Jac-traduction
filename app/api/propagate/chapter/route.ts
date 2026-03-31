@@ -98,7 +98,9 @@ RULES:
 7. NEVER translate machine names: DURO, VARIA, VMP, VMA, VMS, PICO, FORM-IT, SOLEO, TOPAZE, SIMPLY, NEMO, PICOMATIC
 8. NEVER translate error codes: E01, E02, E03, etc.
 9. Preserve figure references, units (mm, kg, °C, rpm, bar), and formatting markers
-10. Include ALL paragraphs from TARGET CURRENT (as modified, deleted, or unchanged)${glossarySection}
+10. Include ALL paragraphs from TARGET CURRENT (as modified, deleted, or unchanged)
+11. TABLES: When a table row was deleted in English (e.g., E03 row with its cells now empty), mark ALL paragraphs of that row as <<DELETED>> in the target. When a new table row was added in English (e.g., E04 row), add ALL paragraphs of that row as insertions [N+]. Do NOT merge or combine table cells. When text within a table cell was modified, replace only that cell's text.
+12. CRITICAL TRANSLATION: Translate frequency terms precisely. 'weekly' = 'hebdomadaire' in French, NOT 'mensuel'. 'monthly' = 'mensuel'. 'daily' = 'quotidien'. 'weekly' = 'wöchentlich' in German. 'weekly' = 'semanal' in Spanish. Do not confuse frequency terms.${glossarySection}
 
 Return ONLY the modified ${targetName} chapter in the format above. No explanations, no markdown fences.`;
 

@@ -168,7 +168,9 @@ export function PropagationStep({
 
       const beforeNorm = beforeText.replace(/\s+/g, ' ').trim();
       const afterNorm = afterText.replace(/\s+/g, ' ').trim();
-      const isChanged = beforeNorm !== afterNorm;
+      const beforeLineCount = beforeText.split('\n').filter((l) => l.trim()).length;
+      const afterLineCount = afterText.split('\n').filter((l) => l.trim()).length;
+      const isChanged = beforeNorm !== afterNorm || beforeLineCount !== afterLineCount;
 
       if (isChanged) {
         changedChapterIndices.push(i);
