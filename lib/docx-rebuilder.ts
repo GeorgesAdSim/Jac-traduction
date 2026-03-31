@@ -113,6 +113,28 @@ export function extractParaText(paraXml: string): string {
 }
 
 /**
+ * Find all <w:tr> table row boundaries in the XML.
+ */
+export function findTableRowBoundaries(xml: string): Array<{ start: number; end: number }> {
+  const rows: Array<{ start: number; end: number }> = [];
+  let pos = 0;
+  while (pos < xml.length) {
+    const openIdx = xml.indexOf('<w:tr', pos);
+    if (openIdx === -1) break;
+    const charAfter = xml[openIdx + 5];
+    if (charAfter !== '>' && charAfter !== ' ') {
+      pos = openIdx + 5;
+      continue;
+    }
+    const closeIdx = xml.indexOf('</w:tr>', openIdx);
+    if (closeIdx === -1) break;
+    rows.push({ start: openIdx, end: closeIdx + 7 });
+    pos = closeIdx + 7;
+  }
+  return rows;
+}
+
+/**
  * Get text content of paragraphs in a range.
  * Uses indexOf-based parsing — safe on large single-line XML.
  */
@@ -317,8 +339,9 @@ export function detectSectionsInRawXml(xml: string): RawSection[] {
 
 export interface SectionModification {
   relativeParagraphIndex: number;
-  action: 'delete_paragraph' | 'replace_text' | 'insert_after';
+  action: 'delete_paragraph' | 'replace_text' | 'insert_after' | 'delete_table_row' | 'insert_table_row';
   newText?: string;
+  cellTexts?: string[];
 }
 
 /**
@@ -384,6 +407,61 @@ export function applyModificationsToSection(
         if (!mod.newText) break;
         const newPara = `<w:p><w:r><w:t xml:space="preserve">${escapeXml(mod.newText)}</w:t></w:r></w:p>`;
         currentXml = currentXml.substring(0, end) + newPara + currentXml.substring(end);
+        break;
+      }
+
+      case 'delete_table_row': {
+        // Find the <w:tr> containing this paragraph and remove it entirely
+        const trBounds = findTableRowBoundaries(currentXml);
+        for (const tr of trBounds) {
+          if (start >= tr.start && start < tr.end) {
+            currentXml = currentXml.substring(0, tr.start) + currentXml.substring(tr.end);
+            break;
+          }
+        }
+        break;
+      }
+
+      case 'insert_table_row': {
+        // Find the <w:tr> containing the reference paragraph, insert new row after it
+        const trBounds2 = findTableRowBoundaries(currentXml);
+        for (const tr of trBounds2) {
+          if (start >= tr.start && start < tr.end) {
+            const refRowXml = currentXml.substring(tr.start, tr.end);
+            const cells = mod.cellTexts || [mod.newText || ''];
+
+            // Extract <w:trPr> from reference row if present
+            let trPr = '';
+            const trPrStart = refRowXml.indexOf('<w:trPr');
+            if (trPrStart !== -1) {
+              const trPrEnd = refRowXml.indexOf('</w:trPr>', trPrStart);
+              if (trPrEnd !== -1) {
+                trPr = refRowXml.substring(trPrStart, trPrEnd + 9);
+              }
+            }
+
+            // Extract <w:tcPr> from each cell in the reference row for formatting
+            const tcPrs: string[] = [];
+            let tcScan = 0;
+            while (tcScan < refRowXml.length) {
+              const tcPrStart = refRowXml.indexOf('<w:tcPr', tcScan);
+              if (tcPrStart === -1) break;
+              const tcPrEnd = refRowXml.indexOf('</w:tcPr>', tcPrStart);
+              if (tcPrEnd === -1) break;
+              tcPrs.push(refRowXml.substring(tcPrStart, tcPrEnd + 9));
+              tcScan = tcPrEnd + 9;
+            }
+
+            const cellsXml = cells.map((t, idx) => {
+              const tcPr = idx < tcPrs.length ? tcPrs[idx] : '';
+              return `<w:tc>${tcPr}<w:p><w:r><w:t xml:space="preserve">${escapeXml(t)}</w:t></w:r></w:p></w:tc>`;
+            }).join('');
+
+            const newRow = `<w:tr>${trPr}${cellsXml}</w:tr>`;
+            currentXml = currentXml.substring(0, tr.end) + newRow + currentXml.substring(tr.end);
+            break;
+          }
+        }
         break;
       }
     }

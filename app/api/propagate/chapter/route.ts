@@ -77,29 +77,38 @@ You will receive three versions of the same chapter from a technical manual:
 2. SOURCE AFTER: The English chapter AFTER modifications were applied
 3. TARGET CURRENT: The ${targetName} chapter that needs the same modifications applied
 
-Each version uses numbered paragraph format: [N] paragraph text
+Each version uses a mixed format:
+- Regular paragraphs: [N] paragraph text
+- Table rows: [TABLE ROW N] cell1 | cell2 | cell3
 
 Your task: Apply the EXACT same modifications to the ${targetName} chapter.
 
 RESPONSE FORMAT — you MUST use these exact formats:
-- [N] modified text — for a paragraph whose text should change (translate the new English version)
-- [N] original text — for a paragraph that should NOT change (copy from TARGET CURRENT as-is)
-- [N] <<DELETED>> — for a paragraph that should be removed (was removed in SOURCE AFTER)
-- [N] (empty) — for a paragraph that should remain empty
-- [N+] translated new text — to INSERT a new paragraph AFTER position N (was added in SOURCE AFTER)
+
+For regular paragraphs:
+- [N] modified text — paragraph whose text changed (translate the new English version)
+- [N] original text — paragraph unchanged (copy from TARGET CURRENT as-is)
+- [N] <<DELETED>> — paragraph removed (was removed in SOURCE AFTER)
+- [N] (empty) — paragraph that should remain empty
+- [N+] translated new text — INSERT new paragraph AFTER position N
+
+For table rows:
+- [TABLE ROW N] cell1 | cell2 | cell3 — table row (modified or unchanged, with cells separated by |)
+- [TABLE ROW N] <<DELETED>> — DELETE entire table row
+- [TABLE ROW N+] cell1 | cell2 | cell3 — INSERT new table row AFTER row N
 
 RULES:
 1. Text DELETED in English (present in BEFORE, absent in AFTER) → mark <<DELETED>> in ${targetName}
-2. Text ADDED in English (absent in BEFORE, present in AFTER) → translate to ${targetName} and INSERT with [N+]
+2. Text ADDED in English (absent in BEFORE, present in AFTER) → translate to ${targetName} and INSERT with [N+] or [TABLE ROW N+]
 3. Text MODIFIED in English → translate the NEW version to ${targetName}
-4. Paragraphs UNCHANGED between BEFORE and AFTER → keep TARGET CURRENT text exactly as-is
+4. Lines UNCHANGED between BEFORE and AFTER → keep TARGET CURRENT text exactly as-is
 5. N must match the original TARGET CURRENT numbering exactly
 6. ALL text must be in ${targetName} — NEVER include English text
 7. NEVER translate machine names: DURO, VARIA, VMP, VMA, VMS, PICO, FORM-IT, SOLEO, TOPAZE, SIMPLY, NEMO, PICOMATIC
 8. NEVER translate error codes: E01, E02, E03, etc.
 9. Preserve figure references, units (mm, kg, °C, rpm, bar), and formatting markers
-10. Include ALL paragraphs from TARGET CURRENT (as modified, deleted, or unchanged)
-11. TABLES: When a table row was deleted in English (e.g., E03 row with its cells now empty), mark ALL paragraphs of that row as <<DELETED>> in the target. When a new table row was added in English (e.g., E04 row), add ALL paragraphs of that row as insertions [N+]. Do NOT merge or combine table cells. When text within a table cell was modified, replace only that cell's text.
+10. Include ALL lines from TARGET CURRENT (as modified, deleted, or unchanged)
+11. TABLE ROWS: Keep the same number of cells (separated by |) as the original. When a table row was deleted, use [TABLE ROW N] <<DELETED>>. When a row was added, use [TABLE ROW N+] with translated cells.
 12. CRITICAL TRANSLATION: Translate frequency terms precisely. 'weekly' = 'hebdomadaire' in French, NOT 'mensuel'. 'monthly' = 'mensuel'. 'daily' = 'quotidien'. 'weekly' = 'wöchentlich' in German. 'weekly' = 'semanal' in Spanish. Do not confuse frequency terms.${glossarySection}
 
 Return ONLY the modified ${targetName} chapter in the format above. No explanations, no markdown fences.`;

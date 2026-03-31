@@ -99,9 +99,9 @@ export function PropagationStep({
     const {
       splitSectionIntoChapters,
       formatChapterText,
-      extractTextsFromFormat,
+      formatChapterTextWithTables,
       parseChapterResponse,
-      buildChapterModifications,
+      buildChapterModificationsWithTables,
     } = await import('@/lib/docx-chapter-splitter');
 
     const rawSections = detectSectionsInRawXml(documentXml);
@@ -112,19 +112,35 @@ export function PropagationStep({
     }
     addLog(`Section source ${sourceLang} : paras ${rawSourceSection.startPara}-${rawSourceSection.endPara}`);
 
+    // "After" state: removes RED deletions, keeps GREEN additions (current behavior)
     const { cleanedXml, modifications: appliedMods } = cleanSourceSection(
       documentXml,
       rawSourceSection.startPara,
       rawSourceSection.endPara,
+      'after',
+    );
+
+    // "Before" state: removes GREEN additions, keeps RED deletions
+    const { cleanedXml: beforeXml } = cleanSourceSection(
+      documentXml,
+      rawSourceSection.startPara,
+      rawSourceSection.endPara,
+      'before',
     );
 
     addLog(`${appliedMods.length} modifications détectées dans la section source`);
 
-    // === STEP 2: Split source into chapters (before and after cleaning) ===
+    // === STEP 2: Split source into chapters (before and after) ===
+    const beforeSections = detectSectionsInRawXml(beforeXml);
+    const beforeSourceSection = beforeSections.find((s) => s.lang === sourceLang);
+    if (!beforeSourceSection) {
+      addLog('ERREUR : Section source "avant" introuvable');
+      return;
+    }
     const sourceBeforeChapters = splitSectionIntoChapters(
-      documentXml,
-      rawSourceSection.startPara,
-      rawSourceSection.endPara,
+      beforeXml,
+      beforeSourceSection.startPara,
+      beforeSourceSection.endPara,
     );
 
     const newSections = detectSectionsInRawXml(cleanedXml);
@@ -156,15 +172,18 @@ export function PropagationStep({
 
     // === STEP 3: Find which chapters changed ===
     const maxChapters = Math.min(sourceBeforeChapters.length, sourceAfterChapters.length);
-    const sourceBeforeTexts: string[] = [];
-    const sourceAfterTexts: string[] = [];
+    const sourceBeforeTableTexts: string[] = [];
+    const sourceAfterTableTexts: string[] = [];
     const changedChapterIndices: number[] = [];
 
     for (let i = 0; i < maxChapters; i++) {
-      const beforeText = formatChapterText(documentXml, sourceBeforeChapters[i]);
+      // Plain text for comparison
+      const beforeText = formatChapterText(beforeXml, sourceBeforeChapters[i]);
       const afterText = formatChapterText(cleanedXml, sourceAfterChapters[i]);
-      sourceBeforeTexts.push(beforeText);
-      sourceAfterTexts.push(afterText);
+
+      // TABLE ROW format for Claude
+      sourceBeforeTableTexts.push(formatChapterTextWithTables(beforeXml, sourceBeforeChapters[i]).text);
+      sourceAfterTableTexts.push(formatChapterTextWithTables(cleanedXml, sourceAfterChapters[i]).text);
 
       const beforeNorm = beforeText.replace(/\s+/g, ' ').trim();
       const afterNorm = afterText.replace(/\s+/g, ' ').trim();
@@ -177,12 +196,9 @@ export function PropagationStep({
       }
 
       // Diagnostic: log each chapter comparison result
-      const beforeLines = beforeText.split('\n').length;
-      const afterLines = afterText.split('\n').length;
-      addLog(`  ch.${i + 1} "${sourceAfterChapters[i].title.substring(0, 40)}" : ${beforeLines}→${afterLines} paras, modifié=${isChanged}`);
+      addLog(`  ch.${i + 1} "${sourceAfterChapters[i].title.substring(0, 40)}" : before=${beforeLineCount}p after=${afterLineCount}p modifié=${isChanged}`);
 
-      // If NOT changed but we expect it might be, show first few chars for debugging
-      if (!isChanged && beforeLines > 0) {
+      if (!isChanged) {
         const snippet = afterText.substring(0, 80).replace(/\n/g, ' | ');
         addLog(`    aperçu: "${snippet}..."`);
       }
@@ -238,7 +254,7 @@ export function PropagationStep({
         addLog(`${lang} : ${targetChapters.length} chapitres détectés`);
 
         // Collect all modifications from all chapters for this language
-        const allMods: Array<{ relativeParagraphIndex: number; action: 'delete_paragraph' | 'replace_text' | 'insert_after'; newText?: string }> = [];
+        const allMods: Array<{ relativeParagraphIndex: number; action: 'delete_paragraph' | 'replace_text' | 'insert_after' | 'delete_table_row' | 'insert_table_row'; newText?: string; cellTexts?: string[] }> = [];
 
         for (const chIdx of changedChapterIndices) {
           if (chIdx >= targetChapters.length) {
@@ -248,7 +264,8 @@ export function PropagationStep({
             continue;
           }
 
-          const targetText = formatChapterText(currentXml, targetChapters[chIdx]);
+          // Format target with TABLE ROW awareness
+          const targetResult = formatChapterTextWithTables(currentXml, targetChapters[chIdx]);
 
           addLog(`${lang} : chapitre ${chIdx + 1}/${maxChapters} "${sourceAfterChapters[chIdx].title.substring(0, 40)}"...`);
 
@@ -257,9 +274,9 @@ export function PropagationStep({
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              sourceChapterBefore: sourceBeforeTexts[chIdx],
-              sourceChapterAfter: sourceAfterTexts[chIdx],
-              targetChapter: targetText,
+              sourceChapterBefore: sourceBeforeTableTexts[chIdx],
+              sourceChapterAfter: sourceAfterTableTexts[chIdx],
+              targetChapter: targetResult.text,
               targetLang: lang,
               useGlossary,
             }),
@@ -278,15 +295,14 @@ export function PropagationStep({
 
           // Parse Claude's response and build modifications
           const parsed = parseChapterResponse(data.modifiedChapter || '');
-          const originalParaTexts = extractTextsFromFormat(targetText);
           const chapterRelStart = targetChapters[chIdx].startParaIdx - currentTarget.startPara;
 
-          const chapterMods = buildChapterModifications(originalParaTexts, parsed, chapterRelStart);
+          const chapterMods = buildChapterModificationsWithTables(parsed, chapterRelStart, targetResult);
           allMods.push(...chapterMods);
 
           const replaceCount = chapterMods.filter((m) => m.action === 'replace_text').length;
-          const deleteCount = chapterMods.filter((m) => m.action === 'delete_paragraph').length;
-          const insertCount = chapterMods.filter((m) => m.action === 'insert_after').length;
+          const deleteCount = chapterMods.filter((m) => m.action === 'delete_paragraph' || m.action === 'delete_table_row').length;
+          const insertCount = chapterMods.filter((m) => m.action === 'insert_after' || m.action === 'insert_table_row').length;
           addLog(`${lang} : ch.${chIdx + 1} → ${replaceCount} rempl, ${deleteCount} suppr, ${insertCount} insert`);
 
           workDone++;

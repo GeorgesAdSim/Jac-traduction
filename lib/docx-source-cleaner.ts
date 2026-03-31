@@ -205,7 +205,8 @@ function removeHighlight(xml: string): string {
 export function cleanSourceSection(
   fullXml: string,
   sourceStartPara: number,
-  sourceEndPara: number
+  sourceEndPara: number,
+  mode: 'after' | 'before' = 'after'
 ): { cleanedXml: string; modifications: AppliedModification[] } {
   const paraPositions = findParagraphPositions(fullXml);
   const modifications: AppliedModification[] = [];
@@ -245,7 +246,10 @@ export function cleanSourceSection(
         paragraphDeleted: modType === 'DELETE',
       });
 
-      if (modType === 'DELETE') {
+      // In 'before' mode: remove ADD (didn't exist before), keep DELETE (existed before)
+      // In 'after' mode: remove DELETE, keep ADD/MODIFY (current behavior)
+      const shouldRemovePara = mode === 'before' ? modType === 'ADD' : modType === 'DELETE';
+      if (shouldRemovePara) {
         replacements.push({ start: paraStart, end: paraEnd, newXml: '' });
       } else {
         replacements.push({ start: paraStart, end: paraEnd, newXml: removeHighlight(paraXml) });
@@ -276,50 +280,43 @@ export function cleanSourceSection(
         ? extractParaText(fullXml.substring(paraPositions[pIdx + 1].start, paraPositions[pIdx + 1].end))
         : '';
 
-      if (modType === 'DELETE') {
+      // In 'before' mode: remove ADD runs, keep DELETE runs
+      // In 'after' mode: remove DELETE runs, keep ADD/MODIFY runs
+      const shouldRemoveRun = mode === 'before' ? modType === 'ADD' : modType === 'DELETE';
+      if (shouldRemoveRun) {
         parts.push({ start: runPos.start, end: runPos.end, replacement: null });
-        modifications.push({
-          type: 'DELETE',
-          text,
-          paragraphIndex: pIdx - sourceStartPara,
-          contextBefore,
-          contextAfter,
-          paragraphDeleted: false, // will be updated below if all runs are DELETE
-        });
       } else {
-        // ADD or MODIFY: keep text, remove highlight
         const cleaned = removeHighlight(runXml);
         parts.push({ start: runPos.start, end: runPos.end, replacement: cleaned });
-        modifications.push({
-          type: modType,
-          text,
-          paragraphIndex: pIdx - sourceStartPara,
-          contextBefore,
-          contextAfter,
-          paragraphDeleted: false,
-        });
       }
+      modifications.push({
+        type: modType,
+        text,
+        paragraphIndex: pIdx - sourceStartPara,
+        contextBefore,
+        contextAfter,
+        paragraphDeleted: false,
+      });
     }
 
     if (!hasChanges) continue;
 
     // Check if ALL runs with text in this paragraph are DELETE
     // If so, remove the entire paragraph
-    const allRunsAreDelete = runPositions.length > 0 && runPositions.every((runPos) => {
+    const removeType = mode === 'before' ? 'ADD' : 'DELETE';
+    const allRunsRemoved = runPositions.length > 0 && runPositions.every((runPos) => {
       const runXml = paraXml.substring(runPos.start, runPos.end);
       const highlight = getRunHighlight(runXml) || paraHighlight;
       if (!highlight) {
-        // Non-highlighted run: only counts if it has meaningful text
         const text = extractParaText(runXml).trim();
         return text === '';
       }
-      return highlightToType(highlight) === 'DELETE';
+      return highlightToType(highlight) === removeType;
     });
 
-    if (allRunsAreDelete) {
-      // Remove entire paragraph — mark all DELETE mods for this paragraph as paragraphDeleted
+    if (allRunsRemoved) {
       for (const mod of modifications) {
-        if (mod.paragraphIndex === pIdx - sourceStartPara && mod.type === 'DELETE') {
+        if (mod.paragraphIndex === pIdx - sourceStartPara && mod.type === removeType) {
           mod.paragraphDeleted = true;
         }
       }

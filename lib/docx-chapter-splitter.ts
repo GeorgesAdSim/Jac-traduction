@@ -4,7 +4,7 @@
  * between source and target sections with different table structures.
  */
 
-import { findParagraphPositions, extractParaText } from './docx-rebuilder';
+import { findParagraphPositions, extractParaText, findTableRowBoundaries } from './docx-rebuilder';
 
 export interface Chapter {
   title: string;
@@ -14,9 +14,11 @@ export interface Chapter {
 }
 
 export interface ParsedParagraph {
-  originalIndex: number;  // 1-based (from [N])
+  originalIndex: number;  // 1-based (from [N] or [TABLE ROW N])
   action: 'keep_or_replace' | 'delete' | 'insert';
   text: string;
+  isTableRow?: boolean;
+  cellTexts?: string[];
 }
 
 /**
@@ -185,6 +187,93 @@ export function formatChapterText(xml: string, chapter: Chapter): string {
 }
 
 /**
+ * Result of formatting a chapter with table-row awareness.
+ */
+export interface ChapterFormatResult {
+  text: string;
+  /** Maps line number → relative paragraph indices within the chapter */
+  lineToRelParaIndices: Map<number, number[]>;
+  /** Which line numbers are table rows */
+  lineIsTableRow: Set<number>;
+  /** For table rows: individual cell texts */
+  lineCellTexts: Map<number, string[]>;
+  /** Original text for each line (for comparison) */
+  lineOrigText: Map<number, string>;
+}
+
+/**
+ * Format chapter text with table-row awareness.
+ * Regular paragraphs: [N] text
+ * Table rows: [TABLE ROW N] cell1 | cell2 | cell3
+ */
+export function formatChapterTextWithTables(xml: string, chapter: Chapter): ChapterFormatResult {
+  const positions = findParagraphPositions(xml);
+  const trBoundaries = findTableRowBoundaries(xml);
+
+  const lines: string[] = [];
+  const lineToRelParaIndices = new Map<number, number[]>();
+  const lineIsTableRow = new Set<number>();
+  const lineCellTexts = new Map<number, string[]>();
+  const lineOrigText = new Map<number, string>();
+
+  let lineNum = 1;
+  let i = chapter.startParaIdx;
+
+  while (i <= chapter.endParaIdx && i < positions.length) {
+    const paraStart = positions[i].start;
+
+    // Check if this paragraph is inside a table row
+    let containingTr: { start: number; end: number } | null = null;
+    for (const tr of trBoundaries) {
+      if (paraStart >= tr.start && paraStart < tr.end) {
+        containingTr = tr;
+        break;
+      }
+    }
+
+    if (!containingTr) {
+      // Regular paragraph
+      const paraXml = xml.substring(positions[i].start, positions[i].end);
+      const text = extractParaText(paraXml);
+      lines.push(`[${lineNum}] ${text || '(empty)'}`);
+      lineToRelParaIndices.set(lineNum, [i - chapter.startParaIdx]);
+      lineOrigText.set(lineNum, text || '');
+      lineNum++;
+      i++;
+    } else {
+      // Table row — collect all paragraphs in this <w:tr>
+      const rowParaRelIndices: number[] = [];
+      const cellTexts: string[] = [];
+
+      while (i <= chapter.endParaIdx && i < positions.length) {
+        const ps = positions[i].start;
+        if (ps < containingTr.start || ps >= containingTr.end) break;
+        const paraXml = xml.substring(positions[i].start, positions[i].end);
+        cellTexts.push(extractParaText(paraXml) || '(empty)');
+        rowParaRelIndices.push(i - chapter.startParaIdx);
+        i++;
+      }
+
+      const joined = cellTexts.join(' | ');
+      lines.push(`[TABLE ROW ${lineNum}] ${joined}`);
+      lineToRelParaIndices.set(lineNum, rowParaRelIndices);
+      lineIsTableRow.add(lineNum);
+      lineCellTexts.set(lineNum, cellTexts);
+      lineOrigText.set(lineNum, joined);
+      lineNum++;
+    }
+  }
+
+  return {
+    text: lines.join('\n'),
+    lineToRelParaIndices,
+    lineIsTableRow,
+    lineCellTexts,
+    lineOrigText,
+  };
+}
+
+/**
  * Extract plain paragraph texts from formatted chapter text (the [N] format).
  * Returns array of paragraph texts indexed 0-based.
  */
@@ -218,7 +307,47 @@ export function parseChapterResponse(text: string): ParsedParagraph[] {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    // Insert: [N+] text
+    // Table row insert: [TABLE ROW N+] cell1 | cell2 | cell3
+    const tableInsertMatch = trimmed.match(/^\[TABLE ROW (\d+)\+\]\s*(.*)/i);
+    if (tableInsertMatch) {
+      const cellTexts = tableInsertMatch[2].split('|').map(c => c.trim());
+      result.push({
+        originalIndex: parseInt(tableInsertMatch[1]),
+        action: 'insert',
+        text: tableInsertMatch[2].trim(),
+        isTableRow: true,
+        cellTexts,
+      });
+      continue;
+    }
+
+    // Table row delete: [TABLE ROW N] <<DELETED>>
+    const tableDeleteMatch = trimmed.match(/^\[TABLE ROW (\d+)\]\s*<<DELETED>>/i);
+    if (tableDeleteMatch) {
+      result.push({
+        originalIndex: parseInt(tableDeleteMatch[1]),
+        action: 'delete',
+        text: '',
+        isTableRow: true,
+      });
+      continue;
+    }
+
+    // Table row normal/replace: [TABLE ROW N] cell1 | cell2 | cell3
+    const tableNormalMatch = trimmed.match(/^\[TABLE ROW (\d+)\]\s*(.*)/i);
+    if (tableNormalMatch) {
+      const cellTexts = tableNormalMatch[2].split('|').map(c => c.trim());
+      result.push({
+        originalIndex: parseInt(tableNormalMatch[1]),
+        action: 'keep_or_replace',
+        text: tableNormalMatch[2].trim(),
+        isTableRow: true,
+        cellTexts,
+      });
+      continue;
+    }
+
+    // Regular insert: [N+] text
     const insertMatch = trimmed.match(/^\[(\d+)\+\]\s*(.*)/);
     if (insertMatch) {
       result.push({
@@ -229,7 +358,7 @@ export function parseChapterResponse(text: string): ParsedParagraph[] {
       continue;
     }
 
-    // Delete: [N] <<DELETED>>
+    // Regular delete: [N] <<DELETED>>
     const deleteMatch = trimmed.match(/^\[(\d+)\]\s*<<DELETED>>/i);
     if (deleteMatch) {
       result.push({
@@ -240,7 +369,7 @@ export function parseChapterResponse(text: string): ParsedParagraph[] {
       continue;
     }
 
-    // Normal: [N] text
+    // Regular normal: [N] text
     const normalMatch = trimmed.match(/^\[(\d+)\]\s*(.*)/);
     if (normalMatch) {
       const paraText = normalMatch[2].trim();
@@ -310,6 +439,100 @@ export function buildChapterModifications(
           }
         }
         break;
+    }
+  }
+
+  return mods;
+}
+
+/**
+ * Build modifications using table-row-aware format result.
+ * Handles both regular paragraphs and TABLE ROW entries.
+ */
+export function buildChapterModificationsWithTables(
+  parsed: ParsedParagraph[],
+  chapterRelStart: number,
+  formatResult: ChapterFormatResult,
+): Array<{ relativeParagraphIndex: number; action: 'delete_paragraph' | 'replace_text' | 'insert_after' | 'delete_table_row' | 'insert_table_row'; newText?: string; cellTexts?: string[] }> {
+  type Mod = { relativeParagraphIndex: number; action: 'delete_paragraph' | 'replace_text' | 'insert_after' | 'delete_table_row' | 'insert_table_row'; newText?: string; cellTexts?: string[] };
+  const mods: Mod[] = [];
+
+  for (const para of parsed) {
+    const lineNum = para.originalIndex;
+    const paraIndices = formatResult.lineToRelParaIndices.get(lineNum);
+    if (!paraIndices || paraIndices.length === 0) continue;
+
+    if (para.isTableRow) {
+      // Table row operations
+      switch (para.action) {
+        case 'delete':
+          // Delete the entire <w:tr> — use first paragraph's index
+          mods.push({
+            relativeParagraphIndex: chapterRelStart + paraIndices[0],
+            action: 'delete_table_row',
+          });
+          break;
+
+        case 'insert':
+          // Insert new <w:tr> after the referenced row — use last paragraph's index
+          mods.push({
+            relativeParagraphIndex: chapterRelStart + paraIndices[paraIndices.length - 1],
+            action: 'insert_table_row',
+            cellTexts: para.cellTexts || [para.text],
+          });
+          break;
+
+        case 'keep_or_replace': {
+          // Compare individual cells and replace changed ones
+          const origCells = formatResult.lineCellTexts.get(lineNum) || [];
+          const newCells = para.cellTexts || [];
+          for (let c = 0; c < Math.min(paraIndices.length, newCells.length); c++) {
+            const origNorm = normalizeText(origCells[c] || '');
+            const newNorm = normalizeText(newCells[c] || '');
+            if (origNorm !== newNorm && newCells[c]) {
+              mods.push({
+                relativeParagraphIndex: chapterRelStart + paraIndices[c],
+                action: 'replace_text',
+                newText: newCells[c],
+              });
+            }
+          }
+          break;
+        }
+      }
+    } else {
+      // Regular paragraph operations
+      const relIdx = paraIndices[0];
+      switch (para.action) {
+        case 'delete':
+          mods.push({
+            relativeParagraphIndex: chapterRelStart + relIdx,
+            action: 'delete_paragraph',
+          });
+          break;
+
+        case 'insert':
+          mods.push({
+            relativeParagraphIndex: chapterRelStart + relIdx,
+            action: 'insert_after',
+            newText: para.text,
+          });
+          break;
+
+        case 'keep_or_replace': {
+          const origText = formatResult.lineOrigText.get(lineNum) || '';
+          const origNorm = normalizeText(origText);
+          const newNorm = normalizeText(para.text);
+          if (origNorm !== newNorm && para.text) {
+            mods.push({
+              relativeParagraphIndex: chapterRelStart + relIdx,
+              action: 'replace_text',
+              newText: para.text,
+            });
+          }
+          break;
+        }
+      }
     }
   }
 
