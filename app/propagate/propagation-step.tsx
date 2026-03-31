@@ -153,6 +153,8 @@ export function PropagationStep({
         targetSection.endPara
       );
 
+      addLog(`${lang} : section paras ${targetSection.startPara}-${targetSection.endPara} (${targetTexts.length} paras, ${targetTexts.filter(Boolean).length} non-vides)`);
+
       // Build lightweight patches: only ~6 paragraphs of context per modification
       const patches = appliedMods.map((mod) => {
         const srcIdx = mod.paragraphIndex; // relative to source section

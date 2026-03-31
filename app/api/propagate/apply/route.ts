@@ -89,15 +89,17 @@ async function processPatchBatch(
     const targetCtx = patch.targetContext.filter(Boolean).join('\n    ');
 
     return `--- MODIFICATION ${i + 1} [${typeLabel}] ---
-  Text in ${sourceName}: "${patch.text}"
-  ${sourceName} context (surrounding paragraphs):
+  Text in source (${sourceName}): "${patch.text}"
+  Source (${sourceName}) context — for reference only, DO NOT copy this text:
     ${sourceCtx}
-  ${targetName} context (surrounding paragraphs):
+  Target (${targetName}) context — find/replace in THIS text:
     ${targetCtx}`;
   }).join('\n\n');
 
   const systemPrompt = `You are an expert technical documentation translator for JAC industrial bakery machines.
 You propagate modifications from ${sourceName} to ${targetName}.
+
+CRITICAL: You are translating to ${targetName} ONLY. Every text you produce MUST be in ${targetName}. NEVER output text in any other language.
 
 MANDATORY RULES:
 1. NEVER translate machine names: DURO, VARIA, VMP, VMA, VMS, PICO, FORM-IT, SOLEO, TOPAZE, SIMPLY, NEMO, PICOMATIC
@@ -105,6 +107,7 @@ MANDATORY RULES:
 3. Preserve figure references: fig.2, n°12, §3.1
 4. Preserve units: mm, kg, °C, rpm, bar
 5. RESPECT the glossary terms exactly when provided
+6. ALL replacement text and NEW text MUST be in ${targetName} — not ${sourceName} or any other language
 
 RESPONSE FORMAT — for each modification, output exactly one line using the format that matches the modification type:
 

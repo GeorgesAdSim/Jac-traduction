@@ -221,6 +221,35 @@ export function cleanSourceSection(
     const runPositions = findRunPositions(paraXml);
     if (runPositions.length === 0 && !paraHighlight) continue;
 
+    // Handle paragraphs with pPr-level highlight but NO runs (empty paragraphs)
+    if (runPositions.length === 0 && paraHighlight) {
+      const modType = highlightToType(paraHighlight);
+      if (modType === 'NONE') continue;
+
+      const text = extractParaText(paraXml);
+      const contextBefore = pIdx > 0
+        ? extractParaText(fullXml.substring(paraPositions[pIdx - 1].start, paraPositions[pIdx - 1].end))
+        : '';
+      const contextAfter = pIdx < paraPositions.length - 1
+        ? extractParaText(fullXml.substring(paraPositions[pIdx + 1].start, paraPositions[pIdx + 1].end))
+        : '';
+
+      modifications.push({
+        type: modType,
+        text,
+        paragraphIndex: pIdx - sourceStartPara,
+        contextBefore,
+        contextAfter,
+      });
+
+      if (modType === 'DELETE') {
+        replacements.push({ start: paraStart, end: paraEnd, newXml: '' });
+      } else {
+        replacements.push({ start: paraStart, end: paraEnd, newXml: removeHighlight(paraXml) });
+      }
+      continue;
+    }
+
     let hasChanges = false;
     // Build replacement paragraph by processing each run
     const parts: Array<{ start: number; end: number; replacement: string | null }> = [];
