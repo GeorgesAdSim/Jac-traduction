@@ -6,8 +6,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import type { Modification } from '@/lib/types/docx';
 import type { LanguageSection } from '@/lib/docx-section-detector';
-import type { AppliedModification } from '@/lib/docx-source-cleaner';
-import type { SectionModification, RawSection } from '@/lib/docx-rebuilder';
+import type { RawSection } from '@/lib/docx-rebuilder';
 
 const AVAILABLE_LANGUAGES = [
   { code: 'FR', name: 'Français' },
@@ -44,28 +43,6 @@ interface PropagationStepProps {
   sections?: LanguageSection[];
   documentXml?: string;
   onComplete: (result: PropagationResult) => void;
-}
-
-/**
- * Check if two paragraphs from different languages are structurally similar
- * by comparing shared numeric markers (section numbers, error codes, etc.).
- */
-function paragraphsAreSimilar(text1: string, text2: string): boolean {
-  const t1 = (text1 || '').trim();
-  const t2 = (text2 || '').trim();
-  if (!t1 && !t2) return true;
-  if (!t1 || !t2) return false;
-
-  const markerRegex = /\b\d+(?:\.\d+)*\b|E\d+|fig\.\d+|n°\d+|§[\d.]+/gi;
-  const markers1 = (t1.match(markerRegex) || []).map((m) => m.toLowerCase());
-  const markers2 = (t2.match(markerRegex) || []).map((m) => m.toLowerCase());
-
-  if (markers1.length === 0 && markers2.length === 0) return false;
-
-  for (const m of markers1) {
-    if (markers2.indexOf(m) >= 0) return true;
-  }
-  return false;
 }
 
 export function PropagationStep({
@@ -113,17 +90,20 @@ export function PropagationStep({
     for (const lang of selectedLangs) initialStatus[lang] = 'pending';
     setLangStatus(initialStatus);
 
-    addLog('Initialisation du traitement...');
+    addLog('Initialisation du traitement (approche par chapitres)...');
 
     // === STEP 1: Clean source section ===
     addLog('Nettoyage de la section source...');
     const { cleanSourceSection } = await import('@/lib/docx-source-cleaner');
-    const { getParagraphTexts, detectSectionsInRawXml, applyModificationsToSection } = await import('@/lib/docx-rebuilder');
+    const { detectSectionsInRawXml, applyModificationsToSection } = await import('@/lib/docx-rebuilder');
+    const {
+      splitSectionIntoChapters,
+      formatChapterText,
+      extractTextsFromFormat,
+      parseChapterResponse,
+      buildChapterModifications,
+    } = await import('@/lib/docx-chapter-splitter');
 
-    // Detect sections using raw XML (consistent with findParagraphPositions).
-    // The fast-xml-parser section detector only counts direct body children,
-    // but findParagraphPositions counts ALL <w:p> including table cells.
-    // Using detectSectionsInRawXml ensures correct paragraph indices.
     const rawSections = detectSectionsInRawXml(documentXml);
     const rawSourceSection = rawSections.find((s) => s.lang === sourceLang);
     if (!rawSourceSection) {
@@ -135,80 +115,68 @@ export function PropagationStep({
     const { cleanedXml, modifications: appliedMods } = cleanSourceSection(
       documentXml,
       rawSourceSection.startPara,
-      rawSourceSection.endPara
+      rawSourceSection.endPara,
     );
 
     addLog(`${appliedMods.length} modifications détectées dans la section source`);
 
-    // === STEP 2: Analyze modifications ===
-
-    // 2a. Identify deleted paragraphs
-    const deletedParas: Record<number, boolean> = {};
-    for (const mod of appliedMods) {
-      if (mod.paragraphDeleted) deletedParas[mod.paragraphIndex] = true;
-    }
-    const deletedCount = Object.keys(deletedParas).length;
-
-    // 2b. Group mod types per paragraph
-    const paraModTypes: Record<number, Record<string, boolean>> = {};
-    for (const mod of appliedMods) {
-      if (!paraModTypes[mod.paragraphIndex]) paraModTypes[mod.paragraphIndex] = {};
-      paraModTypes[mod.paragraphIndex][mod.type] = true;
-    }
-
-    // 2c. Identify full-paragraph ADD indices (paragraphs where ONLY mod type is ADD)
-    const fullParaAddIndices: number[] = [];
-    for (const key of Object.keys(paraModTypes)) {
-      const idx = Number(key);
-      const types = Object.keys(paraModTypes[idx]);
-      if (types.length === 1 && types[0] === 'ADD') {
-        fullParaAddIndices.push(idx);
-      }
-    }
-    fullParaAddIndices.sort((a, b) => a - b);
-
-    // 2d. Get original source texts (before cleaning) for alignment computation
-    const originalSourceTexts = getParagraphTexts(
+    // === STEP 2: Split source into chapters (before and after cleaning) ===
+    const sourceBeforeChapters = splitSectionIntoChapters(
       documentXml,
       rawSourceSection.startPara,
-      rawSourceSection.endPara
+      rawSourceSection.endPara,
     );
 
-    // 2e. Get cleaned paragraph texts for each modified (non-deleted) paragraph
-    const cleanedParaTexts: Record<number, string> = {};
-    const modifiedIndices = Object.keys(paraModTypes).map(Number).filter((idx) => !deletedParas[idx]);
-
-    for (const relIdx of modifiedIndices) {
-      let offset = 0;
-      for (const delKey of Object.keys(deletedParas)) {
-        if (Number(delKey) < relIdx) offset++;
-      }
-      const cleanedAbsIdx = rawSourceSection.startPara + relIdx - offset;
-      const texts = getParagraphTexts(cleanedXml, cleanedAbsIdx, cleanedAbsIdx);
-      cleanedParaTexts[relIdx] = texts[0] || '';
-    }
-
-    // 2f. Collect all paragraph texts to translate (full cleaned paragraphs)
-    const textsToTranslate: Array<{ relIdx: number; text: string }> = [];
-    for (const relIdx of modifiedIndices) {
-      const text = cleanedParaTexts[relIdx];
-      if (text.trim()) {
-        textsToTranslate.push({ relIdx, text });
-      }
-    }
-
-    addLog(`${textsToTranslate.length} paragraphes à traduire, ${deletedCount} paragraphes à supprimer`);
-    addLog(`${fullParaAddIndices.length} paragraphes ADD détectés (alignement requis)`);
-
-    // === STEP 3: Re-detect sections in cleaned XML ===
-    // After cleaning source (deleting paragraphs, removing highlights), paragraph indices
-    // have shifted. We MUST re-detect section boundaries in the cleaned XML.
     const newSections = detectSectionsInRawXml(cleanedXml);
-    addLog(`Sections re-détectées : ${newSections.map((s) => `${s.lang}(${s.startPara}-${s.endPara})`).join(', ')}`);
+    const cleanedSource = newSections.find((s) => s.lang === sourceLang);
+    if (!cleanedSource) {
+      addLog('ERREUR : Section source nettoyée introuvable');
+      return;
+    }
+
+    const sourceAfterChapters = splitSectionIntoChapters(
+      cleanedXml,
+      cleanedSource.startPara,
+      cleanedSource.endPara,
+    );
+
+    addLog(`Source : ${sourceBeforeChapters.length} chapitres (avant), ${sourceAfterChapters.length} chapitres (après nettoyage)`);
+    addLog(`Sections : ${newSections.map((s) => `${s.lang}(${s.startPara}-${s.endPara})`).join(', ')}`);
+
+    // === STEP 3: Find which chapters changed ===
+    const maxChapters = Math.min(sourceBeforeChapters.length, sourceAfterChapters.length);
+    const sourceBeforeTexts: string[] = [];
+    const sourceAfterTexts: string[] = [];
+    const changedChapterIndices: number[] = [];
+
+    for (let i = 0; i < maxChapters; i++) {
+      const beforeText = formatChapterText(documentXml, sourceBeforeChapters[i]);
+      const afterText = formatChapterText(cleanedXml, sourceAfterChapters[i]);
+      sourceBeforeTexts.push(beforeText);
+      sourceAfterTexts.push(afterText);
+      if (beforeText.replace(/\s+/g, ' ').trim() !== afterText.replace(/\s+/g, ' ').trim()) {
+        changedChapterIndices.push(i);
+      }
+    }
+
+    addLog(`${changedChapterIndices.length}/${maxChapters} chapitre(s) modifié(s)`);
+    if (changedChapterIndices.length > 0) {
+      for (const idx of changedChapterIndices) {
+        addLog(`  → Chapitre ${idx + 1}: "${sourceAfterChapters[idx].title.substring(0, 50)}"`);
+      }
+    }
+
+    if (changedChapterIndices.length === 0) {
+      addLog('Aucune modification de contenu détectée — propagation terminée');
+      setProgress(100);
+      if (!completeCalled.current) {
+        completeCalled.current = true;
+        onComplete({ modifiedDocumentXml: cleanedXml, languageStats: [], legacyResults: [] });
+      }
+      return;
+    }
 
     // === STEP 4: Process target sections in REVERSE document order ===
-    // Processing from last section to first ensures that modifications to later sections
-    // never shift the paragraph indices of earlier sections.
     let currentXml = cleanedXml;
     const languageStats: PropagationResult['languageStats'] = [];
     const legacyResults: LanguageResult[] = [];
@@ -217,7 +185,11 @@ export function PropagationStep({
     const orderedTargets = selectedLangs
       .map((l) => ({ lang: l, section: newSections.find((s) => s.lang === l) }))
       .filter((x): x is { lang: string; section: RawSection } => x.section != null)
-      .sort((a, b) => b.section.startPara - a.section.startPara); // REVERSE document order
+      .sort((a, b) => b.section.startPara - a.section.startPara);
+
+    // Total work units for progress: changedChapters × languages
+    const totalWork = changedChapterIndices.length * orderedTargets.length;
+    let workDone = 0;
 
     for (let i = 0; i < orderedTargets.length; i++) {
       const { lang } = orderedTargets[i];
@@ -225,30 +197,51 @@ export function PropagationStep({
       addLog(`Propagation ${lang} en cours...`);
 
       try {
-        // Re-detect sections in current XML to get accurate boundaries
+        // Re-detect sections in current XML for accurate boundaries
         const currentSections = detectSectionsInRawXml(currentXml);
         const currentTarget = currentSections.find((s) => s.lang === lang);
         if (!currentTarget) {
           throw new Error(`Section ${lang} introuvable dans le XML`);
         }
 
-        // 4a. Translate all paragraph texts for this language
-        let translations: string[] = [];
-        if (textsToTranslate.length > 0) {
-          addLog(`${lang} : traduction de ${textsToTranslate.length} paragraphes...`);
+        // Split target section into chapters
+        const targetChapters = splitSectionIntoChapters(
+          currentXml,
+          currentTarget.startPara,
+          currentTarget.endPara,
+        );
+        addLog(`${lang} : ${targetChapters.length} chapitres détectés`);
 
-          const res = await fetch('/api/propagate/apply', {
+        // Collect all modifications from all chapters for this language
+        const allMods: Array<{ relativeParagraphIndex: number; action: 'delete_paragraph' | 'replace_text' | 'insert_after'; newText?: string }> = [];
+
+        for (const chIdx of changedChapterIndices) {
+          if (chIdx >= targetChapters.length) {
+            addLog(`${lang} : chapitre ${chIdx + 1} absent — ignoré`);
+            workDone++;
+            setProgress(Math.round((workDone / totalWork) * 95));
+            continue;
+          }
+
+          const targetText = formatChapterText(currentXml, targetChapters[chIdx]);
+
+          addLog(`${lang} : chapitre ${chIdx + 1}/${maxChapters} "${sourceAfterChapters[chIdx].title.substring(0, 40)}"...`);
+
+          // Call chapter-based propagation API
+          const res = await fetch('/api/propagate/chapter', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              texts: textsToTranslate.map((t) => t.text),
+              sourceChapterBefore: sourceBeforeTexts[chIdx],
+              sourceChapterAfter: sourceAfterTexts[chIdx],
+              targetChapter: targetText,
               targetLang: lang,
               useGlossary,
             }),
           });
 
           const responseText = await res.text();
-          let data: { translations?: string[]; error?: string };
+          let data: { modifiedChapter?: string; error?: string };
           try {
             data = JSON.parse(responseText);
           } catch {
@@ -257,141 +250,52 @@ export function PropagationStep({
           if (!res.ok) {
             throw new Error(data.error || `Erreur ${res.status}`);
           }
-          translations = data.translations || [];
-          addLog(`${lang} : ${translations.length} traductions reçues`);
+
+          // Parse Claude's response and build modifications
+          const parsed = parseChapterResponse(data.modifiedChapter || '');
+          const originalParaTexts = extractTextsFromFormat(targetText);
+          const chapterRelStart = targetChapters[chIdx].startParaIdx - currentTarget.startPara;
+
+          const chapterMods = buildChapterModifications(originalParaTexts, parsed, chapterRelStart);
+          allMods.push(...chapterMods);
+
+          const replaceCount = chapterMods.filter((m) => m.action === 'replace_text').length;
+          const deleteCount = chapterMods.filter((m) => m.action === 'delete_paragraph').length;
+          const insertCount = chapterMods.filter((m) => m.action === 'insert_after').length;
+          addLog(`${lang} : ch.${chIdx + 1} → ${replaceCount} rempl, ${deleteCount} suppr, ${insertCount} insert`);
+
+          workDone++;
+          setProgress(Math.round((workDone / totalWork) * 95));
         }
 
-        // Build translation map: source relIdx → translated text
-        const translationMap: Record<number, string> = {};
-        for (let t = 0; t < textsToTranslate.length; t++) {
-          translationMap[textsToTranslate[t].relIdx] = translations[t] || '';
+        // Apply all modifications for this language in one batch
+        if (allMods.length > 0) {
+          currentXml = applyModificationsToSection(currentXml, currentTarget.startPara, allMods);
+          addLog(`${lang} : ${allMods.length} modification(s) appliquée(s) au total`);
+        } else {
+          addLog(`${lang} : aucune modification à appliquer`);
         }
 
-        // 4b. Get target section texts for alignment
-        const targetTexts = getParagraphTexts(currentXml, currentTarget.startPara, currentTarget.endPara);
-        addLog(`${lang} : section paras ${currentTarget.startPara}-${currentTarget.endPara} (${targetTexts.length} paras)`);
-
-        // 4c. Alignment: determine which full-paragraph ADDs are true inserts vs replacements
-        let alignOffset = 0;
-        const isInsert: Record<number, boolean> = {};
-
-        for (const addIdx of fullParaAddIndices) {
-          const adjIdx = addIdx - alignOffset;
-          const nextSourceText =
-            addIdx + 1 < originalSourceTexts.length ? originalSourceTexts[addIdx + 1] : '';
-          const targetAtAdj = adjIdx < targetTexts.length ? targetTexts[adjIdx] : '';
-
-          if (paragraphsAreSimilar(nextSourceText, targetAtAdj)) {
-            isInsert[addIdx] = true;
-            alignOffset++;
-          } else {
-            isInsert[addIdx] = false;
-          }
-        }
-
-        const insertAddCount = Object.keys(isInsert).filter((k) => isInsert[Number(k)]).length;
-        const replaceAddCount = fullParaAddIndices.length - insertAddCount;
-        addLog(`${lang} : alignement — ${insertAddCount} insertion(s), ${replaceAddCount} remplacement(s)`);
-
-        // Helper: count true-insert ADDs before a given relative index
-        const insertsBefore = (relIdx: number): number => {
-          let count = 0;
-          for (const addIdx of fullParaAddIndices) {
-            if (addIdx >= relIdx) break;
-            if (isInsert[addIdx]) count++;
-          }
-          return count;
-        };
-
-        // 4d. Build modification list for this section
-        const sectionMods: SectionModification[] = [];
-        let insertsDone = 0;
-        let deletesDone = 0;
-
-        for (const key of Object.keys(paraModTypes)) {
-          const relIdx = Number(key);
-          const targetRelIdx = relIdx - insertsBefore(relIdx);
-
-          // Full paragraph DELETE
-          if (deletedParas[relIdx]) {
-            sectionMods.push({
-              relativeParagraphIndex: targetRelIdx,
-              action: 'delete_paragraph',
-            });
-            deletesDone++;
-            continue;
-          }
-
-          const types = Object.keys(paraModTypes[relIdx]);
-          const translation = translationMap[relIdx];
-          if (!translation) continue;
-
-          // Full-paragraph ADD — true insert
-          if (types.length === 1 && types[0] === 'ADD' && isInsert[relIdx]) {
-            const insertAfterRelIdx = targetRelIdx - 1;
-            if (insertAfterRelIdx >= 0) {
-              sectionMods.push({
-                relativeParagraphIndex: insertAfterRelIdx,
-                action: 'insert_after',
-                newText: translation,
-              });
-              insertsDone++;
-            }
-            continue;
-          }
-
-          // All other cases: MODIFY, partial DELETE, replacement ADD, mixed
-          sectionMods.push({
-            relativeParagraphIndex: targetRelIdx,
-            action: 'replace_text',
-            newText: translation,
-          });
-        }
-
-        // 4e. Apply all modifications to this section in one batch (reverse order internally)
-        currentXml = applyModificationsToSection(
-          currentXml,
-          currentTarget.startPara,
-          sectionMods
-        );
-
-        const appliedCount = sectionMods.length;
-        addLog(`${lang} : ${appliedCount} modification(s) appliquée(s) (${insertsDone} insert, ${deletesDone} delete)`);
-
-        // Compute stats from updated sections
+        // Compute stats
         const updatedSections = detectSectionsInRawXml(currentXml);
         const updatedTarget = updatedSections.find((s) => s.lang === lang);
-        const newParaCount = updatedTarget
-          ? updatedTarget.endPara - updatedTarget.startPara + 1
-          : 0;
-
         languageStats.push({
           language: lang,
-          modifiedParagraphs: appliedCount,
-          totalParagraphs: newParaCount,
+          modifiedParagraphs: allMods.length,
+          totalParagraphs: updatedTarget ? updatedTarget.endPara - updatedTarget.startPara + 1 : 0,
         });
 
-        // Build legacy result for CSV/JSON export
-        const legacyMods = (modifications || []).map((mod) => {
-          const applied = appliedMods.find(
-            (a: AppliedModification) => a.text === mod.originalText
-          );
-          if (!applied) return { ...mod, status: 'skipped' as const };
-          if (applied.type === 'DELETE')
-            return { ...mod, status: 'deleted' as const };
-          return {
-            ...mod,
-            translatedText: translationMap[applied.paragraphIndex] || mod.originalText,
-            status: 'translated' as const,
-          };
-        });
+        // Legacy results for export
         legacyResults.push({
           language: lang,
-          modifications: legacyMods,
+          modifications: (modifications || []).map((mod) => ({
+            ...mod,
+            status: 'translated' as const,
+          })),
           stats: {
-            translated: appliedMods.filter((m: AppliedModification) => m.type !== 'DELETE').length,
-            deleted: appliedMods.filter((m: AppliedModification) => m.type === 'DELETE').length,
-            total: appliedMods.length,
+            translated: allMods.filter((m) => m.action === 'replace_text').length,
+            deleted: allMods.filter((m) => m.action === 'delete_paragraph').length,
+            total: allMods.length,
           },
         });
 
@@ -402,9 +306,10 @@ export function PropagationStep({
         addLog(`ERREUR ${lang} : ${message}`);
         failedLangs.push(lang);
         setWarnings((prev) => [...prev, `${lang} : ${message}`]);
+        // Skip remaining work units for this language
+        workDone += changedChapterIndices.length;
+        setProgress(Math.round((workDone / totalWork) * 95));
       }
-
-      setProgress(Math.round(((i + 1) / orderedTargets.length) * 100));
     }
 
     // Handle selected langs that have no section

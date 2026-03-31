@@ -87,7 +87,7 @@ export function findParagraphPositions(xml: string): Array<{ start: number; end:
 /**
  * Extract text content from a single paragraph XML string.
  */
-function extractParaText(paraXml: string): string {
+export function extractParaText(paraXml: string): string {
   const texts: string[] = [];
   const openTag = '<w:t';
   const closeTag = '</w:t>';
@@ -257,7 +257,7 @@ function replaceInWt(paraXml: string, searchText: string, replaceText: string): 
 /**
  * Escape special XML characters.
  */
-function escapeXml(text: string): string {
+export function escapeXml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -372,6 +372,10 @@ export function applyModificationsToSection(
         if (fullText) {
           const newParaXml = replaceInWt(paraXml, fullText, mod.newText);
           currentXml = currentXml.substring(0, start) + newParaXml + currentXml.substring(end);
+        } else {
+          // Empty paragraph — replace with a new paragraph containing the text
+          const newPara = `<w:p><w:r><w:t xml:space="preserve">${escapeXml(mod.newText)}</w:t></w:r></w:p>`;
+          currentXml = currentXml.substring(0, start) + newPara + currentXml.substring(end);
         }
         break;
       }
