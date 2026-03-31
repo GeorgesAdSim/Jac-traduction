@@ -8,6 +8,7 @@ const parser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
   preserveOrder: false,
+  maxNestedTags: 500,
 });
 
 function extractText(wt: unknown): string {
