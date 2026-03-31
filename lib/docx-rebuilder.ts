@@ -406,41 +406,67 @@ export interface SectionModification {
 }
 
 /**
+ * Build a new <w:tr> by cloning formatting from a reference row.
+ */
+function buildNewTableRow(refRowXml: string, cells: string[]): string {
+  let trPr = '';
+  const trPrStart = refRowXml.indexOf('<w:trPr');
+  if (trPrStart !== -1) {
+    const trPrEnd = refRowXml.indexOf('</w:trPr>', trPrStart);
+    if (trPrEnd !== -1) trPr = refRowXml.substring(trPrStart, trPrEnd + 9);
+  }
+
+  const tcPrs: string[] = [];
+  let tcScan = 0;
+  while (tcScan < refRowXml.length) {
+    const tcPrStart = refRowXml.indexOf('<w:tcPr', tcScan);
+    if (tcPrStart === -1) break;
+    const tcPrEnd = refRowXml.indexOf('</w:tcPr>', tcPrStart);
+    if (tcPrEnd === -1) break;
+    tcPrs.push(refRowXml.substring(tcPrStart, tcPrEnd + 9));
+    tcScan = tcPrEnd + 9;
+  }
+
+  const cellsXml = cells.map((t, idx) => {
+    const tcPr = idx < tcPrs.length ? tcPrs[idx] : '';
+    return `<w:tc>${tcPr}<w:p><w:r><w:t xml:space="preserve">${escapeXml(t)}</w:t></w:r></w:p></w:tc>`;
+  }).join('');
+
+  return `<w:tr>${trPr}${cellsXml}</w:tr>`;
+}
+
+/**
  * Apply a batch of modifications to a document section.
- * Sorts modifications by relative index DESCENDING and applies each one,
- * recalculating paragraph positions before each operation.
+ *
+ * Computes paragraph/table-row positions ONCE on the original XML, converts
+ * all modifications into non-overlapping edits, then builds the result in a
+ * single forward pass — O(n) instead of O(M × n).
  */
 export function applyModificationsToSection(
   xml: string,
   sectionStartPara: number,
   modifications: SectionModification[]
 ): string {
-  // Invalidate caches since we'll be mutating XML
-  clearXmlCaches();
+  if (modifications.length === 0) return xml;
 
-  // Sort by relative index DESCENDING (last paragraph first).
-  // For same index: insert_after before delete_paragraph (insert must happen
-  // while the target paragraph still exists at that position).
-  const actionOrder: Record<string, number> = { insert_after: 0, replace_text: 1, delete_paragraph: 2 };
-  const sorted = [...modifications].sort((a, b) => {
-    if (a.relativeParagraphIndex !== b.relativeParagraphIndex) {
-      return b.relativeParagraphIndex - a.relativeParagraphIndex;
-    }
-    return (actionOrder[a.action] ?? 1) - (actionOrder[b.action] ?? 1);
-  });
+  // Compute positions ONCE on the unmodified XML
+  const positions = findParagraphPositions(xml);
+  const trBoundaries = findTableRowBoundaries(xml);
 
-  let currentXml = xml;
+  // Convert each modification into an edit { start, end, replacement }
+  // operating on the ORIGINAL xml character positions.
+  const edits: Array<{ start: number; end: number; replacement: string }> = [];
 
-  for (const mod of sorted) {
-    const positions = findParagraphPositions(currentXml);
+  for (const mod of modifications) {
     const absIdx = sectionStartPara + mod.relativeParagraphIndex;
 
     if (absIdx < 0 || absIdx >= positions.length) {
-      // For insert_after, clamp to the last paragraph if index is just beyond section end
       if (mod.action === 'insert_after' && absIdx === positions.length && positions.length > 0) {
         const lastPos = positions[positions.length - 1];
-        const newPara = `<w:p><w:r><w:t xml:space="preserve">${escapeXml(mod.newText || '')}</w:t></w:r></w:p>`;
-        currentXml = currentXml.substring(0, lastPos.end) + newPara + currentXml.substring(lastPos.end);
+        edits.push({
+          start: lastPos.end, end: lastPos.end,
+          replacement: `<w:p><w:r><w:t xml:space="preserve">${escapeXml(mod.newText || '')}</w:t></w:r></w:p>`,
+        });
       }
       continue;
     }
@@ -449,37 +475,37 @@ export function applyModificationsToSection(
 
     switch (mod.action) {
       case 'delete_paragraph':
-        currentXml = currentXml.substring(0, start) + currentXml.substring(end);
+        edits.push({ start, end, replacement: '' });
         break;
 
       case 'replace_text': {
         if (!mod.newText) break;
-        const paraXml = currentXml.substring(start, end);
+        const paraXml = xml.substring(start, end);
         const fullText = extractParaText(paraXml);
         if (fullText) {
-          const newParaXml = replaceInWt(paraXml, fullText, mod.newText);
-          currentXml = currentXml.substring(0, start) + newParaXml + currentXml.substring(end);
+          edits.push({ start, end, replacement: replaceInWt(paraXml, fullText, mod.newText) });
         } else {
-          // Empty paragraph — replace with a new paragraph containing the text
-          const newPara = `<w:p><w:r><w:t xml:space="preserve">${escapeXml(mod.newText)}</w:t></w:r></w:p>`;
-          currentXml = currentXml.substring(0, start) + newPara + currentXml.substring(end);
+          edits.push({
+            start, end,
+            replacement: `<w:p><w:r><w:t xml:space="preserve">${escapeXml(mod.newText)}</w:t></w:r></w:p>`,
+          });
         }
         break;
       }
 
       case 'insert_after': {
         if (!mod.newText) break;
-        const newPara = `<w:p><w:r><w:t xml:space="preserve">${escapeXml(mod.newText)}</w:t></w:r></w:p>`;
-        currentXml = currentXml.substring(0, end) + newPara + currentXml.substring(end);
+        edits.push({
+          start: end, end: end,
+          replacement: `<w:p><w:r><w:t xml:space="preserve">${escapeXml(mod.newText)}</w:t></w:r></w:p>`,
+        });
         break;
       }
 
       case 'delete_table_row': {
-        // Find the <w:tr> containing this paragraph and remove it entirely
-        const trBounds = findTableRowBoundaries(currentXml);
-        for (const tr of trBounds) {
+        for (const tr of trBoundaries) {
           if (start >= tr.start && start < tr.end) {
-            currentXml = currentXml.substring(0, tr.start) + currentXml.substring(tr.end);
+            edits.push({ start: tr.start, end: tr.end, replacement: '' });
             break;
           }
         }
@@ -487,42 +513,14 @@ export function applyModificationsToSection(
       }
 
       case 'insert_table_row': {
-        // Find the <w:tr> containing the reference paragraph, insert new row after it
-        const trBounds2 = findTableRowBoundaries(currentXml);
-        for (const tr of trBounds2) {
+        for (const tr of trBoundaries) {
           if (start >= tr.start && start < tr.end) {
-            const refRowXml = currentXml.substring(tr.start, tr.end);
+            const refRowXml = xml.substring(tr.start, tr.end);
             const cells = mod.cellTexts || [mod.newText || ''];
-
-            // Extract <w:trPr> from reference row if present
-            let trPr = '';
-            const trPrStart = refRowXml.indexOf('<w:trPr');
-            if (trPrStart !== -1) {
-              const trPrEnd = refRowXml.indexOf('</w:trPr>', trPrStart);
-              if (trPrEnd !== -1) {
-                trPr = refRowXml.substring(trPrStart, trPrEnd + 9);
-              }
-            }
-
-            // Extract <w:tcPr> from each cell in the reference row for formatting
-            const tcPrs: string[] = [];
-            let tcScan = 0;
-            while (tcScan < refRowXml.length) {
-              const tcPrStart = refRowXml.indexOf('<w:tcPr', tcScan);
-              if (tcPrStart === -1) break;
-              const tcPrEnd = refRowXml.indexOf('</w:tcPr>', tcPrStart);
-              if (tcPrEnd === -1) break;
-              tcPrs.push(refRowXml.substring(tcPrStart, tcPrEnd + 9));
-              tcScan = tcPrEnd + 9;
-            }
-
-            const cellsXml = cells.map((t, idx) => {
-              const tcPr = idx < tcPrs.length ? tcPrs[idx] : '';
-              return `<w:tc>${tcPr}<w:p><w:r><w:t xml:space="preserve">${escapeXml(t)}</w:t></w:r></w:p></w:tc>`;
-            }).join('');
-
-            const newRow = `<w:tr>${trPr}${cellsXml}</w:tr>`;
-            currentXml = currentXml.substring(0, tr.end) + newRow + currentXml.substring(tr.end);
+            edits.push({
+              start: tr.end, end: tr.end,
+              replacement: buildNewTableRow(refRowXml, cells),
+            });
             break;
           }
         }
@@ -531,5 +529,26 @@ export function applyModificationsToSection(
     }
   }
 
-  return currentXml;
+  if (edits.length === 0) return xml;
+
+  // Sort ascending by position. For same start: wider range first (so
+  // delete_table_row at tr.start is before delete_paragraph at para.start
+  // when para.start > tr.start), then zero-width inserts last.
+  edits.sort((a, b) => a.start - b.start || b.end - a.end);
+
+  // Build result in a single forward pass, skipping overlapping edits
+  const parts: string[] = [];
+  let lastEnd = 0;
+  for (const edit of edits) {
+    if (edit.start < lastEnd) continue; // overlapping — skip
+    parts.push(xml.substring(lastEnd, edit.start));
+    parts.push(edit.replacement);
+    lastEnd = Math.max(lastEnd, edit.end);
+  }
+  parts.push(xml.substring(lastEnd));
+
+  // Invalidate caches since the XML has changed
+  clearXmlCaches();
+
+  return parts.join('');
 }

@@ -295,12 +295,21 @@ export function cleanSourceSection(
     replacements.push({ start: paraStart, end: paraEnd, newXml: newParaXml });
   }
 
-  // Apply all paragraph replacements backwards to preserve positions
-  let cleanedXml = fullXml;
-  for (let i = replacements.length - 1; i >= 0; i--) {
-    const r = replacements[i];
-    cleanedXml = cleanedXml.substring(0, r.start) + r.newXml + cleanedXml.substring(r.end);
+  // Build result in a single forward pass — O(n) instead of O(N × n)
+  // where N = number of replacements, n = XML length.
+  // Replacements are already in ascending position order.
+  if (replacements.length === 0) {
+    return { cleanedXml: fullXml, modifications };
   }
+  const parts: string[] = [];
+  let lastEnd = 0;
+  for (const r of replacements) {
+    parts.push(fullXml.substring(lastEnd, r.start));
+    parts.push(r.newXml);
+    lastEnd = r.end;
+  }
+  parts.push(fullXml.substring(lastEnd));
+  const cleanedXml = parts.join('');
 
   return { cleanedXml, modifications };
 }
