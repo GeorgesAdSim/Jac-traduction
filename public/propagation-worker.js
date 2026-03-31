@@ -39,49 +39,20 @@ function findTableRowBoundariesCached(xml) {
 
 function findParagraphPositions(xml) {
   var positions = [];
-  var openTag = '<w:p';
-  var closeTag = '</w:p>';
   var searchFrom = 0;
-
-  while (searchFrom < xml.length) {
-    var openIdx = xml.indexOf(openTag, searchFrom);
+  var xmlLen = xml.length;
+  while (searchFrom < xmlLen) {
+    var openIdx = xml.indexOf('<w:p', searchFrom);
     if (openIdx === -1) break;
-
-    var charAfterTag = xml[openIdx + openTag.length];
-    if (charAfterTag !== '>' && charAfterTag !== ' ') {
-      searchFrom = openIdx + openTag.length;
-      continue;
-    }
-
-    var depth = 1;
-    var pos = openIdx + openTag.length;
-    while (depth > 0 && pos < xml.length) {
-      var nextOpen = xml.indexOf(openTag, pos);
-      var nextClose = xml.indexOf(closeTag, pos);
-
-      if (nextClose === -1) break;
-
-      if (nextOpen !== -1 && nextOpen < nextClose) {
-        var charAfter = xml[nextOpen + openTag.length];
-        if (charAfter === '>' || charAfter === ' ') {
-          depth++;
-        }
-        pos = nextOpen + openTag.length;
-      } else {
-        depth--;
-        if (depth === 0) {
-          var endPos = nextClose + closeTag.length;
-          positions.push({ start: openIdx, end: endPos });
-        }
-        pos = nextClose + closeTag.length;
-      }
-    }
-
-    searchFrom = positions.length > 0
-      ? positions[positions.length - 1].end
-      : openIdx + openTag.length;
+    var c = xml.charCodeAt(openIdx + 4);
+    // '>' = 62, ' ' = 32 — skip <w:pPr, <w:pStyle etc.
+    if (c !== 62 && c !== 32) { searchFrom = openIdx + 4; continue; }
+    // In valid OOXML, <w:p> never nests inside <w:p> — just find the NEXT </w:p>
+    var closeIdx = xml.indexOf('</w:p>', openIdx + 4);
+    if (closeIdx === -1) break;
+    positions.push({ start: openIdx, end: closeIdx + 6 });
+    searchFrom = closeIdx + 6;
   }
-
   return positions;
 }
 
