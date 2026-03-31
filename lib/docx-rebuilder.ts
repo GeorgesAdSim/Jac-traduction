@@ -1,44 +1,21 @@
 /**
  * Client-side .docx rebuilder.
- * Takes the original file, cleaned source XML, and reconstructs the .docx.
+ * Takes the original file + modified document.xml and reconstructs the .docx.
  */
 
 import JSZip from 'jszip';
-
-function splitIntoParagraphs(xmlContent: string): {
-  before: string;
-  paragraphs: string[];
-  after: string;
-} {
-  const paraRegex = /<([a-zA-Z0-9]+):p[\s>][\s\S]*?<\/\1:p>/g;
-  const paragraphs: string[] = [];
-  const positions: Array<{ start: number; end: number }> = [];
-
-  let m;
-  while ((m = paraRegex.exec(xmlContent)) !== null) {
-    paragraphs.push(m[0]);
-    positions.push({ start: m.index, end: m.index + m[0].length });
-  }
-
-  const before = positions.length > 0 ? xmlContent.substring(0, positions[0].start) : xmlContent;
-  const after = positions.length > 0
-    ? xmlContent.substring(positions[positions.length - 1].end)
-    : '';
-
-  return { before, paragraphs, after };
-}
 
 /**
  * Rebuild a .docx file with the modified document.xml.
  */
 export async function rebuildDocx(
   originalFile: File,
-  cleanedDocumentXml: string,
+  modifiedDocumentXml: string,
 ): Promise<Blob> {
   const buffer = await originalFile.arrayBuffer();
   const zip = await JSZip.loadAsync(buffer, { createFolders: false });
 
-  zip.file('word/document.xml', cleanedDocumentXml);
+  zip.file('word/document.xml', modifiedDocumentXml);
 
   const blob = await zip.generateAsync({
     type: 'blob',
@@ -51,51 +28,105 @@ export async function rebuildDocx(
 }
 
 /**
- * Replace paragraphs in a range with new paragraph XML content.
+ * Find all <w:p ...>...</w:p> paragraph boundaries using indexOf.
+ * Much more reliable than regex on multi-MB single-line XML.
+ * Returns start/end character positions for each paragraph.
  */
-export function replaceParagraphsInXml(
-  fullXml: string,
-  startPara: number,
-  endPara: number,
-  newParagraphsXml: string
-): string {
-  const { before, paragraphs, after } = splitIntoParagraphs(fullXml);
-  const result = [
-    ...paragraphs.slice(0, startPara),
-    newParagraphsXml,
-    ...paragraphs.slice(endPara + 1),
-  ];
-  return before + result.join('') + after;
+function findParagraphPositions(xml: string): Array<{ start: number; end: number }> {
+  const positions: Array<{ start: number; end: number }> = [];
+  const openTag = '<w:p';
+  const closeTag = '</w:p>';
+  let searchFrom = 0;
+
+  while (searchFrom < xml.length) {
+    const openIdx = xml.indexOf(openTag, searchFrom);
+    if (openIdx === -1) break;
+
+    // Verify it's actually <w:p> or <w:p ... (not <w:pPr etc.)
+    const charAfterTag = xml[openIdx + openTag.length];
+    if (charAfterTag !== '>' && charAfterTag !== ' ') {
+      searchFrom = openIdx + openTag.length;
+      continue;
+    }
+
+    // Find the matching </w:p> — handle nested tags by counting depth
+    let depth = 1;
+    let pos = openIdx + openTag.length;
+    while (depth > 0 && pos < xml.length) {
+      const nextOpen = xml.indexOf(openTag, pos);
+      const nextClose = xml.indexOf(closeTag, pos);
+
+      if (nextClose === -1) break; // malformed XML
+
+      if (nextOpen !== -1 && nextOpen < nextClose) {
+        // Check it's really <w:p> or <w:p ..., not <w:pPr
+        const charAfter = xml[nextOpen + openTag.length];
+        if (charAfter === '>' || charAfter === ' ') {
+          depth++;
+        }
+        pos = nextOpen + openTag.length;
+      } else {
+        depth--;
+        if (depth === 0) {
+          const endPos = nextClose + closeTag.length;
+          positions.push({ start: openIdx, end: endPos });
+        }
+        pos = nextClose + closeTag.length;
+      }
+    }
+
+    searchFrom = positions.length > 0
+      ? positions[positions.length - 1].end
+      : openIdx + openTag.length;
+  }
+
+  return positions;
 }
 
 /**
- * Get the raw XML of paragraphs in a range.
+ * Extract text content from a single paragraph XML string.
  */
-export function getParagraphsXml(
-  fullXml: string,
-  startPara: number,
-  endPara: number
-): string {
-  const { paragraphs } = splitIntoParagraphs(fullXml);
-  return paragraphs.slice(startPara, endPara + 1).join('');
+function extractParaText(paraXml: string): string {
+  const texts: string[] = [];
+  const openTag = '<w:t';
+  const closeTag = '</w:t>';
+  let pos = 0;
+
+  while (pos < paraXml.length) {
+    const openIdx = paraXml.indexOf(openTag, pos);
+    if (openIdx === -1) break;
+
+    // Find the end of the opening tag
+    const tagEnd = paraXml.indexOf('>', openIdx);
+    if (tagEnd === -1) break;
+
+    // Find the closing </w:t>
+    const closeIdx = paraXml.indexOf(closeTag, tagEnd + 1);
+    if (closeIdx === -1) break;
+
+    texts.push(paraXml.substring(tagEnd + 1, closeIdx));
+    pos = closeIdx + closeTag.length;
+  }
+
+  return texts.join('');
 }
 
 /**
  * Get text content of paragraphs in a range.
+ * Uses indexOf-based parsing — safe on large single-line XML.
  */
 export function getParagraphTexts(
   fullXml: string,
   startPara: number,
   endPara: number
 ): string[] {
-  const { paragraphs } = splitIntoParagraphs(fullXml);
-  return paragraphs.slice(startPara, endPara + 1).map((p) => {
-    const texts: string[] = [];
-    const tRegex = /<[^>]*:t[^>]*>([\s\S]*?)<\/[^>]*:t>/g;
-    let match;
-    while ((match = tRegex.exec(p)) !== null) {
-      texts.push(match[1]);
-    }
-    return texts.join('');
-  });
+  const positions = findParagraphPositions(fullXml);
+  const results: string[] = [];
+
+  for (let i = startPara; i <= endPara && i < positions.length; i++) {
+    const paraXml = fullXml.substring(positions[i].start, positions[i].end);
+    results.push(extractParaText(paraXml));
+  }
+
+  return results;
 }

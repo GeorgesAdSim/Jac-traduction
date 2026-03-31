@@ -99,7 +99,7 @@ export function PropagationStep({
     // Step 1: Clean source section
     addLog('Nettoyage de la section source...');
     const { cleanSourceSection } = await import('@/lib/docx-source-cleaner');
-    const { getParagraphTexts, getParagraphsXml } = await import('@/lib/docx-rebuilder');
+    const { getParagraphTexts } = await import('@/lib/docx-rebuilder');
 
     const sourceSection = sections.find((s) => s.isSource);
     if (!sourceSection) {
@@ -123,6 +123,8 @@ export function PropagationStep({
     );
 
     // Step 2: Propagate to each target language using lightweight patches
+    // Patches are applied directly on the full XML with string.replace —
+    // no paragraph splitting/reinsertion needed.
     let currentXml = cleanedXml;
     const languageStats: PropagationResult['languageStats'] = [];
     const legacyResults: LanguageResult[] = [];
@@ -154,11 +156,9 @@ export function PropagationStep({
       // Build lightweight patches: only ~6 paragraphs of context per modification
       const patches = appliedMods.map((mod) => {
         const srcIdx = mod.paragraphIndex; // relative to source section
-        // Map source paragraph index to approximate target index (proportional)
         const ratio = targetTexts.length / sourceTexts.length;
         const tgtIdx = Math.min(Math.round(srcIdx * ratio), targetTexts.length - 1);
 
-        // Extract ±CONTEXT_RADIUS paragraphs around modification
         const srcStart = Math.max(0, srcIdx - CONTEXT_RADIUS);
         const srcEnd = Math.min(sourceTexts.length - 1, srcIdx + CONTEXT_RADIUS);
         const tgtStart = Math.max(0, tgtIdx - CONTEXT_RADIUS);
@@ -216,29 +216,14 @@ export function PropagationStep({
           setProgress(Math.round(langProgress * 100));
         }
 
-        // Apply all FIND/REPLACE patches to the target section XML
-        let targetXml = getParagraphsXml(
-          currentXml,
-          targetSection.startPara,
-          targetSection.endPara
-        );
-
+        // Apply FIND/REPLACE patches directly on the full XML — no paragraph splitting
         let appliedCount = 0;
         for (const patch of allPatchResults) {
-          if (patch.find && targetXml.includes(patch.find)) {
-            targetXml = targetXml.replace(patch.find, patch.replace);
+          if (patch.find && currentXml.includes(patch.find)) {
+            currentXml = currentXml.replace(patch.find, patch.replace);
             appliedCount++;
           }
         }
-
-        // Put the modified target XML back into the full document
-        const { replaceParagraphsInXml } = await import('@/lib/docx-rebuilder');
-        currentXml = replaceParagraphsInXml(
-          currentXml,
-          targetSection.startPara,
-          targetSection.endPara,
-          targetXml
-        );
 
         languageStats.push({
           language: lang,
