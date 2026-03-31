@@ -20,9 +20,39 @@ export interface ParsedParagraph {
 }
 
 /**
- * Check if a paragraph is a heading (chapter title).
+ * Check if a paragraph is inside a table cell by looking for unclosed <w:tc> before it.
  */
-function isHeadingParagraph(paraXml: string): boolean {
+function isInsideTable(xml: string, paraStart: number): boolean {
+  // Look back up to 5000 chars and count <w:tc> vs </w:tc> tags
+  const lookback = xml.substring(Math.max(0, paraStart - 5000), paraStart);
+  let depth = 0;
+  let pos = 0;
+  while (pos < lookback.length) {
+    const nextOpen = lookback.indexOf('<w:tc', pos);
+    const nextClose = lookback.indexOf('</w:tc>', pos);
+    if (nextOpen === -1 && nextClose === -1) break;
+    if (nextOpen !== -1 && (nextClose === -1 || nextOpen < nextClose)) {
+      const charAfter = lookback[nextOpen + 5];
+      if (charAfter === '>' || charAfter === ' ') depth++;
+      pos = nextOpen + 5;
+    } else {
+      depth = Math.max(0, depth - 1);
+      pos = nextClose + 7;
+    }
+  }
+  return depth > 0;
+}
+
+/**
+ * Check if a paragraph is a heading (chapter title).
+ * Excludes paragraphs inside table cells.
+ */
+function isHeadingParagraph(paraXml: string, xml?: string, paraStart?: number): boolean {
+  // Never treat table cell paragraphs as headings
+  if (xml && paraStart !== undefined && isInsideTable(xml, paraStart)) {
+    return false;
+  }
+
   // Check for heading style in pPr
   const pPrIdx = paraXml.indexOf('<w:pPr');
   if (pPrIdx !== -1) {
@@ -34,9 +64,19 @@ function isHeadingParagraph(paraXml: string): boolean {
     }
   }
 
-  // Check text pattern: starts with number+period (e.g. "1. SPECIFICATIONS", "2.3 Safety")
+  // Text-based heading detection with strict rules to avoid matching table values
+  // like "1.5 mm", "2.3 bar", "3. 500", etc.
   const text = extractParaText(paraXml).trim();
-  if (/^\d+(\.\d+)*\.?\s+\S/.test(text) && text.length < 120) return true;
+  if (text.length < 8 || text.length > 120) return false;
+
+  // Pattern: "N. WORD..." — number + period + NOT followed by digit + word starting with letter
+  // Matches: "1. DESCRIPTION", "2. SAFETY", "3. SPECIFICATIONS"
+  // Excludes: "1.5 mm", "2.3 bar", "3. 500"
+  if (/^\d+\.(?!\d)\s+[A-Za-zÀ-ÿ]{2,}/.test(text)) return true;
+
+  // Pattern: "N.N WORD..." — sub-heading like "2.1 General Safety"
+  // The text after the number must start with a letter, not a digit or unit
+  if (/^\d+\.\d+\.?\s+[A-Za-zÀ-ÿ]{2,}/.test(text) && !/^\d+\.\d+\.?\s+\d/.test(text)) return true;
 
   return false;
 }
@@ -59,11 +99,11 @@ export function splitSectionIntoChapters(
   const contentStart = sectionStartPara + 1;
   if (contentStart > sectionEndPara || contentStart >= positions.length) return [];
 
-  // Find heading paragraphs in the section
+  // Find heading paragraphs in the section (excluding table cells)
   const headingIndices: number[] = [];
   for (let i = contentStart; i <= sectionEndPara && i < positions.length; i++) {
     const paraXml = xml.substring(positions[i].start, positions[i].end);
-    if (isHeadingParagraph(paraXml)) {
+    if (isHeadingParagraph(paraXml, xml, positions[i].start)) {
       headingIndices.push(i);
     }
   }

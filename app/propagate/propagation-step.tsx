@@ -140,8 +140,19 @@ export function PropagationStep({
       cleanedSource.endPara,
     );
 
-    addLog(`Source : ${sourceBeforeChapters.length} chapitres (avant), ${sourceAfterChapters.length} chapitres (après nettoyage)`);
+    addLog(`Source AVANT : ${sourceBeforeChapters.length} chapitres`);
+    for (const ch of sourceBeforeChapters) {
+      addLog(`  [avant] ch "${ch.title}" paras ${ch.startParaIdx}-${ch.endParaIdx} (${ch.paragraphCount}p)`);
+    }
+    addLog(`Source APRÈS : ${sourceAfterChapters.length} chapitres`);
+    for (const ch of sourceAfterChapters) {
+      addLog(`  [après] ch "${ch.title}" paras ${ch.startParaIdx}-${ch.endParaIdx} (${ch.paragraphCount}p)`);
+    }
     addLog(`Sections : ${newSections.map((s) => `${s.lang}(${s.startPara}-${s.endPara})`).join(', ')}`);
+
+    if (sourceBeforeChapters.length !== sourceAfterChapters.length) {
+      addLog(`⚠ ATTENTION : nombre de chapitres différent avant/après (${sourceBeforeChapters.length} vs ${sourceAfterChapters.length})`);
+    }
 
     // === STEP 3: Find which chapters changed ===
     const maxChapters = Math.min(sourceBeforeChapters.length, sourceAfterChapters.length);
@@ -154,17 +165,29 @@ export function PropagationStep({
       const afterText = formatChapterText(cleanedXml, sourceAfterChapters[i]);
       sourceBeforeTexts.push(beforeText);
       sourceAfterTexts.push(afterText);
-      if (beforeText.replace(/\s+/g, ' ').trim() !== afterText.replace(/\s+/g, ' ').trim()) {
+
+      const beforeNorm = beforeText.replace(/\s+/g, ' ').trim();
+      const afterNorm = afterText.replace(/\s+/g, ' ').trim();
+      const isChanged = beforeNorm !== afterNorm;
+
+      if (isChanged) {
         changedChapterIndices.push(i);
+      }
+
+      // Diagnostic: log each chapter comparison result
+      const beforeLines = beforeText.split('\n').length;
+      const afterLines = afterText.split('\n').length;
+      addLog(`  ch.${i + 1} "${sourceAfterChapters[i].title.substring(0, 40)}" : ${beforeLines}→${afterLines} paras, modifié=${isChanged}`);
+
+      // If NOT changed but we expect it might be, show first few chars for debugging
+      if (!isChanged && beforeLines > 0) {
+        const snippet = afterText.substring(0, 80).replace(/\n/g, ' | ');
+        addLog(`    aperçu: "${snippet}..."`);
       }
     }
 
-    addLog(`${changedChapterIndices.length}/${maxChapters} chapitre(s) modifié(s)`);
-    if (changedChapterIndices.length > 0) {
-      for (const idx of changedChapterIndices) {
-        addLog(`  → Chapitre ${idx + 1}: "${sourceAfterChapters[idx].title.substring(0, 50)}"`);
-      }
-    }
+    addLog(`Chapitres modifiés : ${changedChapterIndices.length}/${maxChapters} — ${changedChapterIndices.map((idx) => `"${sourceAfterChapters[idx].title.substring(0, 30)}"`).join(', ') || '(aucun)'}`);
+
 
     if (changedChapterIndices.length === 0) {
       addLog('Aucune modification de contenu détectée — propagation terminée');
