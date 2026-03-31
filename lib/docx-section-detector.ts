@@ -136,6 +136,28 @@ function ensureArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [value];
 }
 
+function matchLanguageMarker(text: string): { lang: string; label: string } | null {
+  if (!text) return null;
+
+  let cleaned = text.trim();
+  // Remove brackets: "[English]" -> "English"
+  cleaned = cleaned.replace(/^\[\s*/, '').replace(/\s*\]$/, '').trim();
+
+  // Direct match
+  if (LANGUAGE_MARKERS[cleaned]) {
+    return { lang: LANGUAGE_MARKERS[cleaned], label: cleaned };
+  }
+
+  // Case-insensitive match
+  for (const [marker, code] of Object.entries(LANGUAGE_MARKERS)) {
+    if (cleaned.toLowerCase() === marker.toLowerCase()) {
+      return { lang: code, label: marker };
+    }
+  }
+
+  return null;
+}
+
 /**
  * Detect language sections in a parsed docx document.
  * The parsed doc comes from fast-xml-parser with the same config as client-docx-parser.
@@ -146,17 +168,17 @@ export function detectLanguageSections(parsedDoc: Record<string, unknown>): Sect
     return { headerRange: null, sections: [], sourceLang: 'EN' };
   }
 
-  // Find paragraphs whose text exactly matches a known language marker
+  // Find paragraphs whose text matches a known language marker
   const markerPositions: Array<{ index: number; lang: string; label: string }> = [];
 
   for (const para of paragraphs) {
     if (!para.text) continue;
-    const trimmed = para.text.trim();
-    if (LANGUAGE_MARKERS[trimmed]) {
+    const match = matchLanguageMarker(para.text);
+    if (match && !markerPositions.some((m) => m.lang === match.lang)) {
       markerPositions.push({
         index: para.index,
-        lang: LANGUAGE_MARKERS[trimmed],
-        label: trimmed,
+        lang: match.lang,
+        label: match.label,
       });
     }
   }
