@@ -62,7 +62,9 @@ function isHeadingParagraph(paraXml: string, xml?: string, paraStart?: number): 
     if (pPrEnd !== -1) {
       const pPr = paraXml.substring(pPrIdx, pPrEnd);
       if (/w:val="[Hh]eading\d*"/.test(pPr)) return true;
+      if (/w:val="Titre\d+"/.test(pPr)) return true;
       if (pPr.indexOf('w:val="TOC') !== -1) return true;
+      if (pPr.indexOf('w:val="TM') !== -1) return true;
     }
   }
 

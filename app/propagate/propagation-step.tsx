@@ -13,11 +13,8 @@ function yieldToMain(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-/** Worker result from the heavy XML processing */
-interface WorkerResult {
-  cleanedXml: string;
-  beforeXml: string;
-  rawSections: RawSection[];
+/** Worker prepare result (lightweight — no XML) */
+interface WorkerPrepareResult {
   newSections: RawSection[];
   appliedModsCount: number;
   sourceBeforeChapters: Array<{ title: string; startParaIdx: number; endParaIdx: number; paragraphCount: number }>;
@@ -116,34 +113,43 @@ export function PropagationStep({
     addLog('Préparation du document (Web Worker — pas de freeze navigateur)...');
 
     // === STEP 1-3: Heavy XML processing in Web Worker ===
+    // Worker keeps XML in memory — main thread only gets lightweight metadata
     const worker = new Worker('/propagation-worker.js');
 
-    let workerResult: WorkerResult;
-    try {
-      workerResult = await new Promise<WorkerResult>((resolve, reject) => {
-        worker.onmessage = (e: MessageEvent) => {
+    /** Send a message to the worker and wait for a specific response type */
+    function workerRpc<T>(msg: Record<string, unknown>, responseType: string): Promise<T> {
+      return new Promise<T>((resolve, reject) => {
+        function handler(e: MessageEvent) {
           if (e.data.type === 'progress') {
             addLog(`${e.data.step}: ${e.data.detail}`);
-          } else if (e.data.type === 'result') {
-            resolve(e.data as WorkerResult);
+          } else if (e.data.type === responseType) {
+            worker.removeEventListener('message', handler);
+            resolve(e.data as T);
           } else if (e.data.type === 'error') {
+            worker.removeEventListener('message', handler);
             reject(new Error(e.data.message));
           }
-        };
-        worker.onerror = (e) => reject(new Error(e.message));
-        worker.postMessage({ type: 'prepare', xml: documentXml, sourceLang });
+        }
+        worker.addEventListener('message', handler);
+        worker.postMessage(msg);
       });
+    }
+
+    let prepareResult: WorkerPrepareResult;
+    try {
+      prepareResult = await workerRpc<WorkerPrepareResult>(
+        { type: 'prepare', xml: documentXml, sourceLang },
+        'result',
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Erreur inconnue';
       addLog(`ERREUR Worker : ${message}`);
       worker.terminate();
       return;
     }
-    worker.terminate();
 
-    // Unpack worker results
+    // Unpack lightweight results (no XML strings)
     const {
-      cleanedXml,
       newSections,
       appliedModsCount,
       sourceBeforeChapters,
@@ -154,11 +160,10 @@ export function PropagationStep({
       maxChapters,
       chapterLogs,
       mismatchChapterCount,
-    } = workerResult;
+    } = prepareResult;
 
     addLog(`${appliedModsCount} modifications détectées dans la section source`);
 
-    // Log chapter details from worker
     addLog(`Source AVANT : ${sourceBeforeChapters.length} chapitres`);
     for (const ch of sourceBeforeChapters) {
       addLog(`  [avant] ch "${ch.title}" paras ${ch.startParaIdx}-${ch.endParaIdx} (${ch.paragraphCount}p)`);
@@ -173,7 +178,6 @@ export function PropagationStep({
       addLog(`⚠ ATTENTION : nombre de chapitres différent avant/après (${sourceBeforeChapters.length} vs ${sourceAfterChapters.length})`);
     }
 
-    // Log chapter comparison results
     for (const cl of chapterLogs) {
       addLog(`  ch.${cl.index + 1} "${cl.title}" : before=${cl.beforeLines}p after=${cl.afterLines}p modifié=${cl.isChanged}`);
       if (!cl.isChanged && cl.snippet) {
@@ -184,26 +188,18 @@ export function PropagationStep({
     addLog(`Chapitres modifiés : ${changedChapterIndices.length}/${maxChapters} — ${changedChapterIndices.map((idx) => `"${sourceAfterChapters[idx].title.substring(0, 30)}"`).join(', ') || '(aucun)'}`);
 
     if (changedChapterIndices.length === 0) {
-      addLog('Aucune modification de contenu détectée — propagation terminée');
+      addLog('Aucune modification de contenu détectée — récupération du XML final...');
+      const finalResult = await workerRpc<{ xml: string }>({ type: 'get-final-xml' }, 'final-xml');
+      worker.terminate();
       setProgress(100);
       if (!completeCalled.current) {
         completeCalled.current = true;
-        onComplete({ modifiedDocumentXml: cleanedXml, languageStats: [], legacyResults: [] });
+        onComplete({ modifiedDocumentXml: finalResult.xml, languageStats: [], legacyResults: [] });
       }
       return;
     }
 
-    // === STEP 4: Process target sections (light work — API calls + small XML ops) ===
-    // Import only the functions needed for target processing (these are lightweight per-chapter)
-    const { applyModificationsToSection, clearXmlCaches, detectSectionsInRawXml } = await import('@/lib/docx-rebuilder');
-    const {
-      splitSectionIntoChapters,
-      formatChapterTextWithTables,
-      parseChapterResponse,
-      buildChapterModificationsWithTables,
-    } = await import('@/lib/docx-chapter-splitter');
-
-    let currentXml = cleanedXml;
+    // === STEP 4: API calls on main thread, XML ops in Worker ===
     const languageStats: PropagationResult['languageStats'] = [];
     const legacyResults: LanguageResult[] = [];
     const failedLangs: string[] = [];
@@ -223,42 +219,36 @@ export function PropagationStep({
       await yieldToMain();
 
       try {
-        clearXmlCaches();
-
-        const currentSections = detectSectionsInRawXml(currentXml);
-        const currentTarget = currentSections.find((s) => s.lang === lang);
-        if (!currentTarget) {
-          throw new Error(`Section ${lang} introuvable dans le XML`);
-        }
-
-        const targetChapters = splitSectionIntoChapters(
-          currentXml,
-          currentTarget.startPara,
-          currentTarget.endPara,
-        );
-        addLog(`${lang} : ${targetChapters.length} chapitres détectés`);
-
-        const allMods: Array<{ relativeParagraphIndex: number; action: 'delete_paragraph' | 'replace_text' | 'insert_after' | 'delete_table_row' | 'insert_table_row'; newText?: string; cellTexts?: string[] }> = [];
+        let targetChapterCount = 0;
 
         for (const chIdx of changedChapterIndices) {
-          if (chIdx >= targetChapters.length) {
+          // Ask worker to format the target chapter (worker does the heavy XML scan)
+          const targetInfo = await workerRpc<{
+            lang: string; chIdx: number; skipped: boolean;
+            targetText?: string; targetFormatResult?: Record<string, unknown>;
+            targetChapterStartPara?: number; targetSectionStartPara?: number;
+            targetChapterCount: number;
+          }>({ type: 'format-target', lang, chIdx }, 'target-formatted');
+
+          targetChapterCount = targetInfo.targetChapterCount;
+
+          if (targetInfo.skipped) {
             addLog(`${lang} : chapitre ${chIdx + 1} absent — ignoré`);
             workDone++;
             setProgress(Math.round((workDone / totalWork) * 95));
             continue;
           }
 
-          const targetResult = formatChapterTextWithTables(currentXml, targetChapters[chIdx]);
-
           addLog(`${lang} : chapitre ${chIdx + 1}/${maxChapters} "${sourceAfterChapters[chIdx].title.substring(0, 40)}"...`);
 
+          // API call on main thread (non-blocking network)
           const res = await fetch('/api/propagate/chapter', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               sourceChapterBefore: sourceBeforeTableTexts[chIdx],
               sourceChapterAfter: sourceAfterTableTexts[chIdx],
-              targetChapter: targetResult.text,
+              targetChapter: targetInfo.targetText,
               targetLang: lang,
               useGlossary,
             }),
@@ -275,34 +265,45 @@ export function PropagationStep({
             throw new Error(data.error || `Erreur ${res.status}`);
           }
 
-          const parsed = parseChapterResponse(data.modifiedChapter || '');
-          const chapterRelStart = targetChapters[chIdx].startParaIdx - currentTarget.startPara;
+          // Send API response to worker for parsing + mod building
+          const applied = await workerRpc<{
+            lang: string; chIdx: number;
+            replaceCount: number; deleteCount: number; insertCount: number;
+            totalPendingMods: number;
+          }>({
+            type: 'apply-chapter',
+            lang,
+            chIdx,
+            modifiedChapter: data.modifiedChapter,
+            targetFormatResult: targetInfo.targetFormatResult,
+            targetChapterStartPara: targetInfo.targetChapterStartPara,
+            targetSectionStartPara: targetInfo.targetSectionStartPara,
+          }, 'chapter-applied');
 
-          const chapterMods = buildChapterModificationsWithTables(parsed, chapterRelStart, targetResult);
-          allMods.push(...chapterMods);
-
-          const replaceCount = chapterMods.filter((m) => m.action === 'replace_text').length;
-          const deleteCount = chapterMods.filter((m) => m.action === 'delete_paragraph' || m.action === 'delete_table_row').length;
-          const insertCount = chapterMods.filter((m) => m.action === 'insert_after' || m.action === 'insert_table_row').length;
-          addLog(`${lang} : ch.${chIdx + 1} → ${replaceCount} rempl, ${deleteCount} suppr, ${insertCount} insert`);
+          addLog(`${lang} : ch.${chIdx + 1} → ${applied.replaceCount} rempl, ${applied.deleteCount} suppr, ${applied.insertCount} insert`);
 
           workDone++;
           setProgress(Math.round((workDone / totalWork) * 95));
         }
 
-        if (allMods.length > 0) {
-          currentXml = applyModificationsToSection(currentXml, currentTarget.startPara, allMods);
-          addLog(`${lang} : ${allMods.length} modification(s) appliquée(s) au total`);
+        // Tell worker to apply all accumulated mods for this language
+        const langResult = await workerRpc<{
+          lang: string; modCount: number; totalParagraphs: number;
+          replaceCount: number; deleteCount: number;
+        }>({ type: 'apply-lang-done', lang }, 'lang-applied');
+
+        if (langResult.modCount > 0) {
+          addLog(`${lang} : ${langResult.modCount} modification(s) appliquée(s) au total`);
         } else {
           addLog(`${lang} : aucune modification à appliquer`);
         }
 
-        const updatedSections = detectSectionsInRawXml(currentXml);
-        const updatedTarget = updatedSections.find((s) => s.lang === lang);
+        addLog(`${lang} : ${targetChapterCount} chapitres détectés`);
+
         languageStats.push({
           language: lang,
-          modifiedParagraphs: allMods.length,
-          totalParagraphs: updatedTarget ? updatedTarget.endPara - updatedTarget.startPara + 1 : 0,
+          modifiedParagraphs: langResult.modCount,
+          totalParagraphs: langResult.totalParagraphs,
         });
 
         legacyResults.push({
@@ -312,9 +313,9 @@ export function PropagationStep({
             status: 'translated' as const,
           })),
           stats: {
-            translated: allMods.filter((m) => m.action === 'replace_text').length,
-            deleted: allMods.filter((m) => m.action === 'delete_paragraph').length,
-            total: allMods.length,
+            translated: langResult.replaceCount,
+            deleted: langResult.deleteCount,
+            total: langResult.modCount,
           },
         });
 
@@ -346,6 +347,20 @@ export function PropagationStep({
       addLog('Propagation échouée pour toutes les langues');
     }
 
+    // Get final XML from worker (single large transfer at the end)
+    addLog('Récupération du XML final...');
+    let finalXml: string;
+    try {
+      const finalResult = await workerRpc<{ xml: string }>({ type: 'get-final-xml' }, 'final-xml');
+      finalXml = finalResult.xml;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Erreur inconnue';
+      addLog(`ERREUR récupération XML : ${message}`);
+      worker.terminate();
+      return;
+    }
+    worker.terminate();
+
     setProgress(100);
 
     if (
@@ -354,7 +369,7 @@ export function PropagationStep({
     ) {
       completeCalled.current = true;
       const result: PropagationResult = {
-        modifiedDocumentXml: currentXml,
+        modifiedDocumentXml: finalXml,
         languageStats,
         legacyResults,
       };
